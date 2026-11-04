@@ -1,5 +1,5 @@
 // Sleep Coach: a check-in timer for gentle sleep training. Everything is stored on the phone (localStorage).
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const KEY = 'sleepcoach.v1';
 
 const PROGRAMS = [
@@ -61,6 +61,7 @@ if (S.planNights == null) S.planNights = 21;
 
 /* ---------- helpers ---------- */
 const $ = sel => document.querySelector(sel);
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const name = () => (S.baby && S.baby.name) || 'baby';
 const fill = s => s.replace(/\{name\}/g, esc(name()));
@@ -83,40 +84,88 @@ const nightChecks = n => n.wakings.reduce((a, w) => a + w.checks.length, 0);
 const liveNight = () => S.live && S.nights[S.live.night];
 const liveWaking = () => { const n = liveNight(); return n && n.wakings[n.wakings.length - 1]; };
 
-/* ---------- soft alert: a quiet "psst" made from filtered noise, plus a buzz ---------- */
-let ac = null;
+/* ---------- soft alert: a quiet "psst", plus a buzz where the phone allows it ----------
+   iPhones mute Web Audio with the silent switch and freeze the app once the screen locks. So the alert is
+   a real audio file played through an <audio> element. During a wait we play ONE track that is silent for
+   the length of the wait and then says "psst" every 10 seconds. Audio keeps playing with the screen locked,
+   so the alert goes off on time even while the app itself is frozen. */
+const SR = 8000;
+let psstClip = null, track = null, trackUrl = null, fx = null, fxUrl = null, silentUrl = null, primed = false;
+function makePsst() {
+  if (psstClip) return psstClip;
+  const out = new Float32Array(Math.round(SR * 1.5));
+  const burst = (at, dur, hiss, peak) => {
+    let lp = 0, px = 0, hp = 0;
+    const a0 = Math.round(at * SR), n = Math.round(dur * SR);
+    for (let i = 0; i < n; i++) {
+      const x = Math.random() * 2 - 1;
+      let y;
+      if (hiss) { hp = 0.6 * (hp + x - px); px = x; y = hp; } else { lp += 0.25 * (x - lp); y = lp * 2; }
+      const t = i / n, env = Math.min(1, t * 12) * Math.pow(1 - t, 1.6);
+      out[a0 + i] += y * env * peak;
+    }
+  };
+  for (const o of [0, 0.75]) { burst(o, 0.04, false, 0.8); burst(o + 0.06, 0.5, true, 0.9); }
+  return (psstClip = out);
+}
+// 16-bit mono WAV: silence, with a psst every 10 s from alarmAt (seconds) to the end.
+function wav(totalSec, alarmAt) {
+  const n = Math.ceil(totalSec * SR), b = new Uint8Array(44 + n * 2), v = new DataView(b.buffer);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, SR, true); v.setUint32(28, SR * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, n * 2, true);
+  if (alarmAt != null) {
+    const c = makePsst();
+    for (let t = alarmAt; t < totalSec; t += 10) {
+      const o = Math.round(t * SR);
+      for (let i = 0; i < c.length && o + i < n; i++) v.setInt16(44 + (o + i) * 2, Math.max(-32767, Math.min(32767, Math.round(c[i] * 28000))), true);
+    }
+  }
+  return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+}
+const newAudio = () => { const a = new Audio(); a.preload = 'auto'; a.setAttribute('playsinline', ''); return a; };
+// Called on every tap. The first tap "unlocks" both players so they may play later without a tap.
 function unlockAudio() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+  if (primed) return;
+  primed = true;
   try {
-    ac = ac || new (window.AudioContext || window.webkitAudioContext)();
-    if (ac.state === 'suspended') ac.resume();
+    track = track || newAudio(); fx = fx || newAudio();
+    fxUrl = fxUrl || wav(1.6, 0); silentUrl = silentUrl || wav(0.2, null);
+    for (const a of [track, fx]) {
+      if (a.src) continue;
+      a.src = silentUrl;
+      // If a real sound replaced the silent one before this settled, leave the real one alone.
+      a.play().then(() => { if (a.src === silentUrl) a.pause(); })
+        .catch(() => { if (a.src === silentUrl) { primed = false; a.removeAttribute('src'); } });
+    }
+  } catch (e) { primed = false; }
+}
+const trackPlaying = () => !!(track && trackUrl && track.src === trackUrl && !track.paused && !track.ended);
+function psst() {
+  if (S.sound) {
+    try { unlockAudio(); if (fx.src !== fxUrl) fx.src = fxUrl; fx.currentTime = 0; fx.play().catch(() => {}); } catch (e) {}
+  }
+  buzz();
+}
+function buzz() { if (S.vibrate && navigator.vibrate) navigator.vibrate([160, 120, 160]); }
+function startTrack(waitMs, label) {
+  if (!S.sound) return;
+  try {
+    unlockAudio();
+    const old = trackUrl, sec = Math.max(1, waitMs / 1000);
+    trackUrl = wav(sec + 120, sec);           // the wait, then 2 minutes of gentle reminders
+    track.src = trackUrl; track.currentTime = 0;
+    track.play().catch(() => {});
+    if (old) setTimeout(() => URL.revokeObjectURL(old), 1000);
+    if ('mediaSession' in navigator) navigator.mediaSession.metadata = new MediaMetadata({
+      title: label, artist: 'Sleep Coach', artwork: [{ src: 'icon-512.png', sizes: '512x512', type: 'image/png' }]
+    });
   } catch (e) {}
 }
-function noise(t, dur, type, freq, peak) {
-  const len = Math.ceil(ac.sampleRate * dur);
-  const buf = ac.createBuffer(1, len, ac.sampleRate);
-  const d = buf.getChannelData(0);
-  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
-  const src = ac.createBufferSource(); src.buffer = buf;
-  const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq;
-  const g = ac.createGain();
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(peak, t + Math.min(0.06, dur / 3));
-  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  src.connect(f); f.connect(g); g.connect(ac.destination);
-  src.start(t); src.stop(t + dur);
-}
-function psst() {
-  if (S.sound && ac) {
-    try {
-      const t = ac.currentTime + 0.02;
-      for (const o of [0, 0.85]) {
-        noise(t + o, 0.035, 'lowpass', 1400, 0.25);        // "p"
-        noise(t + o + 0.07, 0.5, 'highpass', 4200, 0.22);   // "sst"
-      }
-    } catch (e) {}
-  }
-  if (S.vibrate && navigator.vibrate) navigator.vibrate([160, 120, 160]);
-}
+function stopTrack() { try { if (track) track.pause(); } catch (e) {} }
 
 /* ---------- keep the screen awake during a session ---------- */
 let lock = null;
@@ -157,15 +206,16 @@ function startWait() {
   S.live.phase = 'wait';
   S.live.from = Date.now();
   S.live.ends = Date.now() + minsFor(S.live.step) * 60000;
+  startTrack(S.live.ends - Date.now(), 'Next check-in at ' + clock(S.live.ends));
   save(); render();
 }
 function fireAlarm() {
   S.live.phase = 'alarm'; S.live.from = Date.now(); save();
-  psst(); lastPsst = Date.now();
+  trackPlaying() ? buzz() : psst(); lastPsst = Date.now();
   if (document.visibilityState !== 'visible') notify('Time to check on ' + name(), 'Go in for a short, calm check-in.');
   render();
 }
-function goIn() { unlockAudio(); S.live.toldOut = false; S.live.phase = 'checkin'; S.live.from = Date.now(); save(); render(); }
+function goIn() { unlockAudio(); stopTrack(); S.live.toldOut = false; S.live.phase = 'checkin'; S.live.from = Date.now(); save(); render(); }
 function leftRoom() {
   liveWaking().checks.push(Math.round((Date.now() - S.live.from) / 1000));
   S.live.phase = S.live.step >= mins().length - 1 ? 'final' : 'ready';
@@ -174,10 +224,12 @@ function leftRoom() {
 }
 function anotherRound() { S.live.step++; startWait(); }
 function fellAsleep(pickedUp) {
+  stopTrack();
   const w = liveWaking(); w.asleep = Date.now(); w.pickedUp = !!pickedUp;
   S.live.phase = pickedUp ? 'picked' : 'asleep'; save(); render();
 }
 function finishNight() {
+  stopTrack();
   const n = liveNight(); n.ended = Date.now();
   const w = liveWaking(); if (w && !w.asleep) w.asleep = Date.now();
   S.live = null; save(); letSleep();
@@ -309,7 +361,8 @@ function homeScreen(v) {
       <button data-go="progress"><span>📈</span>Progress</button>
       <button data-go="settings"><span>⚙️</span>Settings</button>
     </div>
-    <p class="small muted center" style="margin-top:22px">Keep this screen open while you wait. It stays awake for you.</p>`;
+    <p class="small muted center" style="margin-top:22px">Keep the volume up. You can lock the screen while you wait: the psst still plays.<br>
+      Try <b>Settings › Test with the screen locked</b> once first.</p>`;
   $('#start').onclick = startNight;
   bindGo(v);
 }
@@ -448,7 +501,7 @@ function tick() {
     const bar = $('#bar'); if (bar) bar.setAttribute('stroke-dashoffset', RING * (1 - left / total));
   } else if (L.phase === 'alarm') {
     // Repeat the soft psst every 10 seconds until the parent taps "Going in".
-    if (now - lastPsst > 10000) { psst(); lastPsst = now; }
+    if (now - lastPsst > 10000) { trackPlaying() ? buzz() : psst(); lastPsst = now; }
     const late = $('#late'); const s = Math.floor((now - L.from) / 1000);
     if (late) late.textContent = s >= 5 ? `Alert went off ${mmss(s * 1000)} ago` : '';
   } else if (L.phase === 'checkin') {
@@ -759,8 +812,11 @@ function settingsScreen(v) {
     <div class="card">
       <div class="toggle"><span>Soft “psst” sound</span><input type="checkbox" id="snd" ${S.sound ? 'checked' : ''}></div>
       <div class="toggle"><span>Vibrate</span><input type="checkbox" id="vib" ${S.vibrate ? 'checked' : ''}></div>
-      <button class="btn" id="test">Test the alert</button>
-      <p class="small muted">Turn your phone's volume up a little to test. iPhones don't vibrate from web apps, and the silent switch mutes the sound.</p>
+      <button class="btn" id="test">Test the alert now</button>
+      <button class="btn" id="locktest">Test with the screen locked</button>
+      <p class="small muted" id="lockmsg">Tap it, then lock your phone. After 20 seconds you should hear the psst.</p>
+      <p class="small muted">The psst plays at your phone's <b>media volume</b> (the volume buttons), so turn it up a little.
+        ${isIOS ? 'iPhones never let web apps vibrate, so on iPhone it is sound only.' : ''}</p>
     </div>
     <div class="card">
       <h2>Plan length</h2>
@@ -777,7 +833,16 @@ function settingsScreen(v) {
       Method notes adapted from Katie Bunton's “How I Gently Sleep Trained”. Not medical advice.</p>`;
   $('#snd').onchange = e => { S.sound = e.target.checked; save(); };
   $('#vib').onchange = e => { S.vibrate = e.target.checked; save(); };
-  $('#test').onclick = () => { unlockAudio(); setTimeout(psst, 60); };
+  $('#test').onclick = () => psst();
+  $('#locktest').onclick = () => {
+    if (trackPlaying()) {
+      stopTrack(); $('#locktest').textContent = 'Test with the screen locked'; $('#lockmsg').textContent = 'Test stopped.';
+      return;
+    }
+    startTrack(20000, 'Sleep Coach test');
+    $('#locktest').textContent = 'Stop the test';
+    $('#lockmsg').textContent = 'Lock your phone now. The psst comes in 20 seconds and repeats every 10. Unlock and tap Stop when you have heard it.';
+  };
   v.querySelectorAll('[data-plan]').forEach(b => b.onclick = () => { S.planNights = +b.dataset.plan; save(); render(); });
   const stop = $('#stop'); if (stop) stop.onclick = stopCoach;
   $('#wipe').onclick = () => { if (confirm('Delete all nights from Progress?')) { S.nights = []; S.finished = null; save(); render(); } };
