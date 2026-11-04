@@ -1,5 +1,5 @@
 // Sleep Coach: a check-in timer for gentle sleep training. Everything is stored on the phone (localStorage).
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const KEY = 'sleepcoach.v1';
 
 const PROGRAMS = [
@@ -33,7 +33,7 @@ const WAITING = [
   'Think of tomorrow morning: open curtains, big smiles.',
   'A well-rested {name} is a happier {name}. This is for them.',
   'Count five things you can hear. Slow your breathing.',
-  'Stay put. You will hear a soft “shhh” when it is time.',
+  'Stay put. You will hear a soft alert when it is time.',
   'You love {name} enough to do the hard thing.',
   'Tears now, rest later. For everyone.'
 ];
@@ -84,10 +84,10 @@ const nightChecks = n => n.wakings.reduce((a, w) => a + w.checks.length, 0);
 const liveNight = () => S.live && S.nights[S.live.night];
 const liveWaking = () => { const n = liveNight(); return n && n.wakings[n.wakings.length - 1]; };
 
-/* ---------- soft alert: a long, low "shhhhh", plus a buzz where the phone allows it ----------
+/* ---------- soft alert: a low "beep beep" (or "shhh"), plus a buzz where the phone allows it ----------
    iPhones mute Web Audio with the silent switch and freeze the app once the screen locks. So the alert is
    a real audio file played through an <audio> element. During a wait we play ONE track that is silent for
-   the length of the wait and then says "shhh" every 10 seconds. Audio keeps playing with the screen locked,
+   the length of the wait and then plays the alert every 10 seconds. Audio keeps playing with the screen locked,
    so the alert goes off on time even while the app itself is frozen. */
 // 16 kHz plays cleanly on every phone (Samsungs made 8 kHz sound harsh). Very long tracks drop to 8 kHz to save memory.
 const SHH_SECS = 3;
@@ -104,8 +104,12 @@ function biquad(type, freq, SR) {
     return y;
   };
 }
+// The alert sound the parent picked: a soft low "beep beep" (default) or the "shhh".
+const clipSecs = () => S.tone === 'shh' ? SHH_SECS : 0.6;
 function makePsst(SR) {
-  if (psstClip[SR]) return psstClip[SR];
+  const key = (S.tone || 'beep') + SR;
+  if (psstClip[key]) return psstClip[key];
+  if (S.tone !== 'shh') return (psstClip[key] = makeBeeps(SR));
   const n = Math.round(SR * SHH_SECS), out = new Float32Array(n);
   const hp = biquad('high', 300, SR), lp1 = biquad('low', 1500, SR), lp2 = biquad('low', 1900, SR);
   let peak = 0;
@@ -119,8 +123,23 @@ function makePsst(SR) {
     peak = Math.max(peak, Math.abs(out[i]));
   }
   for (let i = 0; i < n; i++) out[i] = out[i] / peak * 0.6;   // calm, not loud
-  return (psstClip[SR] = out);
+  return (psstClip[key] = out);
 }
+// Two short, low tones, like a gentle tap-tap. Rounded on and off so there is no click.
+// 494 Hz (B4) is about as low as a phone speaker plays clearly; a touch of the octave above helps small speakers.
+function makeBeeps(SR) {
+  const n = Math.round(SR * 0.6), out = new Float32Array(n), f = 494, len = 0.16;
+  for (const start of [0, 0.3]) {
+    const a0 = Math.round(start * SR), m = Math.round(len * SR);
+    for (let i = 0; i < m; i++) {
+      const t = i / SR, env = Math.sin(Math.PI * i / m) ** 2;
+      out[a0 + i] += env * 0.45 * (Math.sin(2 * Math.PI * f * t) + 0.18 * Math.sin(4 * Math.PI * f * t));
+    }
+  }
+  return out;
+}
+// When the sound choice changes, rebuild the test clip.
+function resetClip() { fxUrl = null; if (primed && fx) { fxUrl = wav(clipSecs() + 0.2, 0); } }
 // 16-bit mono WAV: silence, with a shh every 10 s from alarmAt (seconds) to the end.
 function wav(totalSec, alarmAt) {
   const SR = totalSec > 1200 ? 8000 : 16000;
@@ -147,7 +166,7 @@ function unlockAudio() {
   primed = true;
   try {
     track = track || newAudio(); fx = fx || newAudio();
-    fxUrl = fxUrl || wav(SHH_SECS + 0.2, 0); silentUrl = silentUrl || wav(0.2, null);
+    fxUrl = fxUrl || wav(clipSecs() + 0.2, 0); silentUrl = silentUrl || wav(0.2, null);
     for (const a of [track, fx]) {
       if (a.src) continue;
       a.src = silentUrl;
@@ -375,7 +394,7 @@ function homeScreen(v) {
       <button data-go="progress"><span>📈</span>Progress</button>
       <button data-go="settings"><span>⚙️</span>Settings</button>
     </div>
-    <p class="small muted center" style="margin-top:22px">Keep the volume up. You can lock the screen while you wait: the shhh still plays.<br>
+    <p class="small muted center" style="margin-top:22px">Keep the volume up. You can lock the screen while you wait: the alert still plays.<br>
       Try <b>Settings › Test with the screen locked</b> once first.</p>`;
   $('#start').onclick = startNight;
   bindGo(v);
@@ -514,7 +533,7 @@ function tick() {
     const sub = $('#clksub'); if (sub) sub.textContent = 'until check-in';
     const bar = $('#bar'); if (bar) bar.setAttribute('stroke-dashoffset', RING * (1 - left / total));
   } else if (L.phase === 'alarm') {
-    // Repeat the soft shhh every 10 seconds until the parent taps "Going in".
+    // Repeat the soft alert every 10 seconds until the parent taps "Going in".
     if (now - lastPsst > 10000) { trackPlaying() ? buzz() : psst(); lastPsst = now; }
     const late = $('#late'); const s = Math.floor((now - L.from) / 1000);
     if (late) late.textContent = s >= 5 ? `Alert went off ${mmss(s * 1000)} ago` : '';
@@ -824,12 +843,13 @@ function settingsScreen(v) {
       <button class="btn" data-go="program">Change program</button>
     </div>
     <div class="card">
-      <div class="toggle"><span>Soft “shhh” sound</span><input type="checkbox" id="snd" ${S.sound ? 'checked' : ''}></div>
+      <div class="toggle"><span>Sound</span><input type="checkbox" id="snd" ${S.sound ? 'checked' : ''}></div>
+      <div class="seg" style="margin:4px 0 8px">${[['beep', 'Beep beep'], ['shh', 'Shhh']].map(([k, t]) => `<button data-tone="${k}" class="${(S.tone || 'beep') === k ? 'on' : ''}">${t}</button>`).join('')}</div>
       <div class="toggle"><span>Vibrate</span><input type="checkbox" id="vib" ${S.vibrate ? 'checked' : ''}></div>
       <button class="btn" id="test">Test the alert now</button>
       <button class="btn" id="locktest">Test with the screen locked</button>
-      <p class="small muted" id="lockmsg">Tap it, then lock your phone. After 20 seconds you should hear a soft shhh.</p>
-      <p class="small muted">The shhh plays at your phone's <b>media volume</b> (the volume buttons), so turn it up a little.
+      <p class="small muted" id="lockmsg">Tap it, then lock your phone. After 20 seconds you should hear the alert.</p>
+      <p class="small muted">The alert plays at your phone's <b>media volume</b> (the volume buttons), so turn it up a little.
         ${isIOS ? 'iPhones never let web apps vibrate, so on iPhone it is sound only.' : ''}</p>
     </div>
     <div class="card">
@@ -848,6 +868,10 @@ function settingsScreen(v) {
   $('#snd').onchange = e => { S.sound = e.target.checked; save(); };
   $('#vib').onchange = e => { S.vibrate = e.target.checked; save(); };
   $('#test').onclick = () => psst();
+  v.querySelectorAll('[data-tone]').forEach(b => b.onclick = () => {
+    S.tone = b.dataset.tone; save(); resetClip(); psst();   // play the new choice straight away
+    v.querySelectorAll('[data-tone]').forEach(x => x.classList.toggle('on', x === b));
+  });
   $('#locktest').onclick = () => {
     if (trackPlaying()) {
       stopTrack(); $('#locktest').textContent = 'Test with the screen locked'; $('#lockmsg').textContent = 'Test stopped.';
@@ -855,7 +879,7 @@ function settingsScreen(v) {
     }
     startTrack(20000, 'Sleep Coach test');
     $('#locktest').textContent = 'Stop the test';
-    $('#lockmsg').textContent = 'Lock your phone now. The shhh comes in 20 seconds and repeats every 10. Unlock and tap Stop when you have heard it.';
+    $('#lockmsg').textContent = 'Lock your phone now. The alert comes in 20 seconds and repeats every 10. Unlock and tap Stop when you have heard it.';
   };
   v.querySelectorAll('[data-plan]').forEach(b => b.onclick = () => { S.planNights = +b.dataset.plan; save(); render(); });
   const stop = $('#stop'); if (stop) stop.onclick = stopCoach;
