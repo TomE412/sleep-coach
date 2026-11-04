@@ -1,5 +1,5 @@
 // Sleep Coach: a check-in timer for gentle sleep training. Everything is stored on the phone (localStorage).
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const KEY = 'sleepcoach.v1';
 
 const PROGRAMS = [
@@ -33,7 +33,7 @@ const WAITING = [
   'Think of tomorrow morning: open curtains, big smiles.',
   'A well-rested {name} is a happier {name}. This is for them.',
   'Count five things you can hear. Slow your breathing.',
-  'Stay put. You will hear a soft “psst” when it is time.',
+  'Stay put. You will hear a soft “shhh” when it is time.',
   'You love {name} enough to do the hard thing.',
   'Tears now, rest later. For everyone.'
 ];
@@ -84,32 +84,46 @@ const nightChecks = n => n.wakings.reduce((a, w) => a + w.checks.length, 0);
 const liveNight = () => S.live && S.nights[S.live.night];
 const liveWaking = () => { const n = liveNight(); return n && n.wakings[n.wakings.length - 1]; };
 
-/* ---------- soft alert: a quiet "psst", plus a buzz where the phone allows it ----------
+/* ---------- soft alert: a long, low "shhhhh", plus a buzz where the phone allows it ----------
    iPhones mute Web Audio with the silent switch and freeze the app once the screen locks. So the alert is
    a real audio file played through an <audio> element. During a wait we play ONE track that is silent for
-   the length of the wait and then says "psst" every 10 seconds. Audio keeps playing with the screen locked,
+   the length of the wait and then says "shhh" every 10 seconds. Audio keeps playing with the screen locked,
    so the alert goes off on time even while the app itself is frozen. */
-const SR = 8000;
-let psstClip = null, track = null, trackUrl = null, fx = null, fxUrl = null, silentUrl = null, primed = false;
-function makePsst() {
-  if (psstClip) return psstClip;
-  const out = new Float32Array(Math.round(SR * 1.5));
-  const burst = (at, dur, hiss, peak) => {
-    let lp = 0, px = 0, hp = 0;
-    const a0 = Math.round(at * SR), n = Math.round(dur * SR);
-    for (let i = 0; i < n; i++) {
-      const x = Math.random() * 2 - 1;
-      let y;
-      if (hiss) { hp = 0.6 * (hp + x - px); px = x; y = hp; } else { lp += 0.25 * (x - lp); y = lp * 2; }
-      const t = i / n, env = Math.min(1, t * 12) * Math.pow(1 - t, 1.6);
-      out[a0 + i] += y * env * peak;
-    }
+// 16 kHz plays cleanly on every phone (Samsungs made 8 kHz sound harsh). Very long tracks drop to 8 kHz to save memory.
+const SHH_SECS = 3;
+let psstClip = {}, track = null, trackUrl = null, fx = null, fxUrl = null, silentUrl = null, primed = false;
+// Standard (RBJ) two-pole filter, used to shape white noise into a soft, low "shh".
+function biquad(type, freq, SR) {
+  const w = 2 * Math.PI * freq / SR, cs = Math.cos(w), al = Math.sin(w) / (2 * Math.SQRT1_2);
+  const b = type === 'low' ? [(1 - cs) / 2, 1 - cs, (1 - cs) / 2] : [(1 + cs) / 2, -(1 + cs), (1 + cs) / 2];
+  const a0 = 1 + al, a1 = -2 * cs, a2 = 1 - al;
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  return x => {
+    const y = (b[0] * x + b[1] * x1 + b[2] * x2 - a1 * y1 - a2 * y2) / a0;
+    x2 = x1; x1 = x; y2 = y1; y1 = y;
+    return y;
   };
-  for (const o of [0, 0.75]) { burst(o, 0.04, false, 0.8); burst(o + 0.06, 0.5, true, 0.9); }
-  return (psstClip = out);
 }
-// 16-bit mono WAV: silence, with a psst every 10 s from alarmAt (seconds) to the end.
+function makePsst(SR) {
+  if (psstClip[SR]) return psstClip[SR];
+  const n = Math.round(SR * SHH_SECS), out = new Float32Array(n);
+  const hp = biquad('high', 300, SR), lp1 = biquad('low', 1500, SR), lp2 = biquad('low', 1900, SR);
+  let peak = 0;
+  for (let i = 0; i < n; i++) {
+    const t = i / SR;
+    // Breathe in over 0.7 s, hold and ease down, breathe out over the last 1.1 s. No clicks.
+    const rise = Math.min(1, t / 0.7), fall = Math.min(1, (SHH_SECS - t) / 1.1);
+    const env = Math.sin(rise * Math.PI / 2) ** 2 * Math.sin(fall * Math.PI / 2) ** 2 * (1 - 0.15 * t / SHH_SECS)
+      * (1 + 0.06 * Math.sin(2 * Math.PI * 1.1 * t));
+    out[i] = lp2(lp1(hp(Math.random() * 2 - 1))) * env;
+    peak = Math.max(peak, Math.abs(out[i]));
+  }
+  for (let i = 0; i < n; i++) out[i] = out[i] / peak * 0.6;   // calm, not loud
+  return (psstClip[SR] = out);
+}
+// 16-bit mono WAV: silence, with a shh every 10 s from alarmAt (seconds) to the end.
 function wav(totalSec, alarmAt) {
+  const SR = totalSec > 1200 ? 8000 : 16000;
   const n = Math.ceil(totalSec * SR), b = new Uint8Array(44 + n * 2), v = new DataView(b.buffer);
   const str = (o, s) => { for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i); };
   str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
@@ -117,10 +131,10 @@ function wav(totalSec, alarmAt) {
   v.setUint32(24, SR, true); v.setUint32(28, SR * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
   str(36, 'data'); v.setUint32(40, n * 2, true);
   if (alarmAt != null) {
-    const c = makePsst();
+    const c = makePsst(SR);
     for (let t = alarmAt; t < totalSec; t += 10) {
       const o = Math.round(t * SR);
-      for (let i = 0; i < c.length && o + i < n; i++) v.setInt16(44 + (o + i) * 2, Math.max(-32767, Math.min(32767, Math.round(c[i] * 28000))), true);
+      for (let i = 0; i < c.length && o + i < n; i++) v.setInt16(44 + (o + i) * 2, Math.max(-32767, Math.min(32767, Math.round(c[i] * 30000))), true);
     }
   }
   return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
@@ -133,7 +147,7 @@ function unlockAudio() {
   primed = true;
   try {
     track = track || newAudio(); fx = fx || newAudio();
-    fxUrl = fxUrl || wav(1.6, 0); silentUrl = silentUrl || wav(0.2, null);
+    fxUrl = fxUrl || wav(SHH_SECS + 0.2, 0); silentUrl = silentUrl || wav(0.2, null);
     for (const a of [track, fx]) {
       if (a.src) continue;
       a.src = silentUrl;
@@ -361,7 +375,7 @@ function homeScreen(v) {
       <button data-go="progress"><span>📈</span>Progress</button>
       <button data-go="settings"><span>⚙️</span>Settings</button>
     </div>
-    <p class="small muted center" style="margin-top:22px">Keep the volume up. You can lock the screen while you wait: the psst still plays.<br>
+    <p class="small muted center" style="margin-top:22px">Keep the volume up. You can lock the screen while you wait: the shhh still plays.<br>
       Try <b>Settings › Test with the screen locked</b> once first.</p>`;
   $('#start').onclick = startNight;
   bindGo(v);
@@ -500,7 +514,7 @@ function tick() {
     const sub = $('#clksub'); if (sub) sub.textContent = 'until check-in';
     const bar = $('#bar'); if (bar) bar.setAttribute('stroke-dashoffset', RING * (1 - left / total));
   } else if (L.phase === 'alarm') {
-    // Repeat the soft psst every 10 seconds until the parent taps "Going in".
+    // Repeat the soft shhh every 10 seconds until the parent taps "Going in".
     if (now - lastPsst > 10000) { trackPlaying() ? buzz() : psst(); lastPsst = now; }
     const late = $('#late'); const s = Math.floor((now - L.from) / 1000);
     if (late) late.textContent = s >= 5 ? `Alert went off ${mmss(s * 1000)} ago` : '';
@@ -810,12 +824,12 @@ function settingsScreen(v) {
       <button class="btn" data-go="program">Change program</button>
     </div>
     <div class="card">
-      <div class="toggle"><span>Soft “psst” sound</span><input type="checkbox" id="snd" ${S.sound ? 'checked' : ''}></div>
+      <div class="toggle"><span>Soft “shhh” sound</span><input type="checkbox" id="snd" ${S.sound ? 'checked' : ''}></div>
       <div class="toggle"><span>Vibrate</span><input type="checkbox" id="vib" ${S.vibrate ? 'checked' : ''}></div>
       <button class="btn" id="test">Test the alert now</button>
       <button class="btn" id="locktest">Test with the screen locked</button>
-      <p class="small muted" id="lockmsg">Tap it, then lock your phone. After 20 seconds you should hear the psst.</p>
-      <p class="small muted">The psst plays at your phone's <b>media volume</b> (the volume buttons), so turn it up a little.
+      <p class="small muted" id="lockmsg">Tap it, then lock your phone. After 20 seconds you should hear a soft shhh.</p>
+      <p class="small muted">The shhh plays at your phone's <b>media volume</b> (the volume buttons), so turn it up a little.
         ${isIOS ? 'iPhones never let web apps vibrate, so on iPhone it is sound only.' : ''}</p>
     </div>
     <div class="card">
@@ -841,7 +855,7 @@ function settingsScreen(v) {
     }
     startTrack(20000, 'Sleep Coach test');
     $('#locktest').textContent = 'Stop the test';
-    $('#lockmsg').textContent = 'Lock your phone now. The psst comes in 20 seconds and repeats every 10. Unlock and tap Stop when you have heard it.';
+    $('#lockmsg').textContent = 'Lock your phone now. The shhh comes in 20 seconds and repeats every 10. Unlock and tap Stop when you have heard it.';
   };
   v.querySelectorAll('[data-plan]').forEach(b => b.onclick = () => { S.planNights = +b.dataset.plan; save(); render(); });
   const stop = $('#stop'); if (stop) stop.onclick = stopCoach;
