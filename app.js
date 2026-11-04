@@ -1,5 +1,5 @@
 // Sleep Coach: a check-in timer for gentle sleep training. Everything is stored on the phone (localStorage).
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const KEY = 'sleepcoach.v1';
 
 const PROGRAMS = [
@@ -206,7 +206,7 @@ function setupScreen(v) {
   const b = S.baby || { name: '', bed: '19:00', wake: '06:00' };
   const first = !S.baby;
   v.innerHTML = `
-    ${first ? `<div class="hero"><div class="moon">🌙</div><h1>Sleep Coach</h1>
+    ${first ? `<img class="scene" src="scene.jpg" alt=""><div class="hero over"><h1>Sleep Coach</h1>
       <p class="muted">A gentle timer for check-ins, and a friend while you wait.</p></div>` : header('Baby details', 'settings')}
     <div class="card">
       <label for="nm">Baby's name</label>
@@ -274,8 +274,8 @@ function homeScreen(v) {
   const done = READY.filter(r => S.ready[r[0]]).length;
   const hours = nightHours();
   v.innerHTML = `
-    <div class="hero">
-      <div class="moon">🌙</div>
+    <img class="scene" src="scene.jpg" alt="A child plays a flute to a smiling moon and stars">
+    <div class="hero over">
       <h1>Tonight is night ${n}${n <= 10 ? ' of 10' : ''}</h1>
       <p class="muted">for ${esc(name())}</p>
       <div class="chips">
@@ -346,7 +346,7 @@ function sessionScreen(v) {
       </div>`;
   } else if (L.phase === 'alarm') {
     body = `<div class="stage alarm">
-      <div class="pulse">🤫</div>
+      <div class="pulse" aria-hidden="true"></div>
       <h1>Time to check on ${esc(name())}</h1>
       <p class="muted">If you can, go in during a calmer moment of the cry. It settles them better.</p>
       <p class="small muted" id="late"></p></div>
@@ -385,7 +385,7 @@ function sessionScreen(v) {
     const cm = Math.round(cryMs(w) / 60000);
     const morning = isMorning();
     body = `<div class="stage">
-      <div class="moon">${L.phase === 'asleep' ? '😴' : '🤍'}</div>
+      <img class="moon-img" src="icon-192.png" alt="">
       <h1>${L.phase === 'asleep' ? esc(name()) + ' is asleep.' : 'You did your best tonight.'}</h1>
       <p class="muted">${L.phase === 'asleep'
         ? `Crying took about ${cm} min with ${w.checks.length} check-in${w.checks.length === 1 ? '' : 's'}. Go and rest.`
@@ -396,7 +396,7 @@ function sessionScreen(v) {
         <button class="btn ${morning ? 'primary' : ''}" id="finish">It's morning, finish the night</button>
       </div>`;
   }
-  v.innerHTML = `<div class="session">${head}${body}</div>`;
+  v.innerHTML = `<div class="backdrop"></div><div class="session">${head}${body}</div>`;
 
   const on = (id, fn) => { const el = $('#' + id); if (el) el.onclick = fn; };
   on('asleep', () => fellAsleep(false));

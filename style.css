@@ -1,26 +1,47 @@
-/* Night-time palette: dark and warm so it is easy on the eyes in a dark hallway. */
+/* Colours taken from the storybook night scene (scene.jpg): deep starry blue, moon gold, piper's red. */
 :root {
-  --bg: #0f1530;
-  --card: #1a2246;
-  --card-2: #222c58;
-  --line: #2f3a6e;
-  --text: #ece7f6;
-  --muted: #9aa3c7;
-  --warm: #f2b880;
-  --warm-ink: #2a1a08;
-  --calm: #b9a8ff;
-  --good: #8fd3b0;
-  --radius: 18px;
+  --bg: #0a1238;
+  --bg-2: #142a6b;
+  --card: rgba(18, 32, 88, 0.72);
+  --card-2: rgba(30, 48, 120, 0.85);
+  --line: rgba(160, 170, 255, 0.22);
+  --text: #fbf4e2;
+  --muted: #b7bde6;
+  --warm: #ffd27a;
+  --warm-2: #f5a93c;
+  --warm-ink: #3a2306;
+  --calm: #a99bff;
+  --red: #d4483a;
+  --good: #9fdcb4;
+  --glow: 0 0 18px rgba(255, 210, 122, 0.55);
+  --radius: 20px;
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; background: var(--bg); color: var(--text); }
 body {
-  font: 17px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 17px/1.45 ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   min-height: 100vh; min-height: 100dvh;
   padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  background: radial-gradient(120% 70% at 80% 0%, var(--bg-2) 0%, var(--bg) 60%) fixed, var(--bg);
 }
-main { max-width: 520px; margin: 0 auto; padding: 20px 16px 40px; }
-h1 { font-size: 1.6rem; margin: 8px 0 4px; font-weight: 700; letter-spacing: -0.01em; }
+/* Twinkling star field behind everything. */
+body::before, body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background-image:
+    radial-gradient(1.4px 1.4px at 12% 18%, #fff8 50%, transparent 51%),
+    radial-gradient(1.2px 1.2px at 78% 12%, #ffe9b0 50%, transparent 51%),
+    radial-gradient(1px 1px at 40% 32%, #fff8 50%, transparent 51%),
+    radial-gradient(1.6px 1.6px at 88% 46%, #ffe9b0 50%, transparent 51%),
+    radial-gradient(1px 1px at 22% 62%, #fff7 50%, transparent 51%),
+    radial-gradient(1.3px 1.3px at 63% 74%, #fff8 50%, transparent 51%),
+    radial-gradient(1px 1px at 8% 88%, #ffe9b0 50%, transparent 51%),
+    radial-gradient(1.2px 1.2px at 52% 8%, #fff8 50%, transparent 51%);
+}
+body::after { transform: translate(37%, 23%) scale(1.3); animation: twinkle 5s ease-in-out infinite alternate; }
+@keyframes twinkle { from { opacity: 0.25; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { body::after { animation: none; } }
+main { position: relative; z-index: 1; max-width: 520px; margin: 0 auto; padding: 20px 16px 40px; }
+h1 { font-size: 1.6rem; margin: 8px 0 4px; font-weight: 700; letter-spacing: -0.01em; text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5); }
 h2 { font-size: 1.15rem; margin: 24px 0 8px; }
 p { margin: 8px 0; }
 .muted { color: var(--muted); }
@@ -35,7 +56,10 @@ p { margin: 8px 0; }
 }
 .icon-btn:active { background: var(--card); }
 
-.card { background: var(--card); border-radius: var(--radius); padding: 16px; margin: 12px 0; }
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin: 12px 0;
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+}
 .card h2 { margin-top: 0; }
 
 label { display: block; font-size: 0.9rem; color: var(--muted); margin: 14px 0 6px; }
@@ -53,8 +77,8 @@ input[type=time]::-webkit-calendar-picker-indicator { filter: invert(0.8); }
   border-radius: 16px; padding: 16px; margin: 10px 0; text-align: center;
   background: var(--card-2); color: var(--text);
 }
-.btn.primary { background: var(--warm); color: var(--warm-ink); }
-.btn.calm { background: var(--calm); color: #1b1240; }
+.btn.primary { background: linear-gradient(180deg, #ffe4a3, var(--warm) 45%, var(--warm-2)); color: var(--warm-ink); box-shadow: var(--glow); }
+.btn.calm { background: linear-gradient(180deg, #c4b8ff, var(--calm)); color: #1b1240; box-shadow: 0 0 18px rgba(169, 155, 255, 0.45); }
 .btn.good { background: var(--good); color: #0b2a1c; }
 .btn.ghost { background: none; color: var(--muted); font-weight: 500; padding: 10px; }
 .btn.big { font-size: 1.25rem; padding: 22px; }
@@ -67,7 +91,7 @@ input[type=time]::-webkit-calendar-picker-indicator { filter: invert(0.8); }
   background: var(--card); border: 2px solid transparent; border-radius: var(--radius);
   padding: 14px 16px; margin: 10px 0;
 }
-.choice.on { border-color: var(--warm); }
+.choice.on { border-color: var(--warm); box-shadow: var(--glow); }
 .choice b { display: block; font-size: 1.2rem; letter-spacing: 0.02em; }
 .choice span { color: var(--muted); font-size: 0.9rem; }
 
@@ -75,7 +99,20 @@ input[type=time]::-webkit-calendar-picker-indicator { filter: invert(0.8); }
 
 /* Home */
 .hero { text-align: center; padding: 24px 8px 8px; }
+/* The storybook picture, full width at the top, melting into the sky below it. */
+.scene {
+  display: block; width: calc(100% + 32px); margin: -20px -16px -70px; aspect-ratio: 1214 / 1295; max-height: 56vh;
+  object-fit: cover; object-position: 50% 35%;
+  -webkit-mask-image: linear-gradient(#000 60%, transparent); mask-image: linear-gradient(#000 60%, transparent);
+}
+.hero.over { position: relative; padding-top: 0; }
 .moon { font-size: 3rem; line-height: 1; }
+.moon-img { width: 96px; height: 96px; border-radius: 50%; display: block; margin: 0 auto; box-shadow: var(--glow); }
+/* A faint copy of the picture behind the timer screens. */
+.backdrop {
+  position: fixed; inset: 0; z-index: -1; background: url(scene.jpg) 50% 30% / cover no-repeat; opacity: 0.18;
+  -webkit-mask-image: linear-gradient(#000, transparent 85%); mask-image: linear-gradient(#000, transparent 85%);
+}
 .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 12px 0; }
 .chip { background: var(--card); border-radius: 999px; padding: 6px 12px; font-size: 0.9rem; color: var(--muted); }
 .chip b { color: var(--text); font-weight: 600; }
@@ -85,7 +122,7 @@ input[type=time]::-webkit-calendar-picker-indicator { filter: invert(0.8); }
   border-radius: 16px; padding: 14px 6px; cursor: pointer;
 }
 .links button span { display: block; font-size: 1.4rem; margin-bottom: 4px; }
-.warn { background: #3a2a1c; color: #ffd9b0; border-radius: 12px; padding: 10px 12px; font-size: 0.9rem; }
+.warn { background: rgba(212, 72, 58, 0.22); border: 1px solid rgba(212, 72, 58, 0.5); color: #ffd9c8; border-radius: 12px; padding: 10px 12px; font-size: 0.9rem; }
 
 /* Session */
 .session { display: flex; flex-direction: column; min-height: calc(100dvh - 60px); }
@@ -95,14 +132,17 @@ input[type=time]::-webkit-calendar-picker-indicator { filter: invert(0.8); }
 .ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
 .ring circle { fill: none; stroke-width: 10; }
 .ring .track { stroke: var(--card-2); }
-.ring .bar { stroke: var(--calm); stroke-linecap: round; transition: stroke-dashoffset 0.3s linear; }
+.ring .bar { stroke: var(--warm); stroke-linecap: round; transition: stroke-dashoffset 0.3s linear; }
+.ring svg { filter: drop-shadow(0 0 8px rgba(255, 210, 122, 0.55)); }
 .ring.checkin .bar { stroke: var(--good); }
+.ring.checkin svg { filter: drop-shadow(0 0 8px rgba(159, 220, 180, 0.5)); }
 .ring-text { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .clock { font-size: 3.4rem; font-weight: 300; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
 .clock-sub { color: var(--muted); font-size: 0.9rem; }
 
 .encourage {
   min-height: 5.2em; font-size: 1.3rem; line-height: 1.35; padding: 0 8px; font-weight: 500;
+  color: #fff1cf; text-shadow: 0 0 14px rgba(255, 210, 122, 0.45);
   transition: opacity 0.6s ease;
 }
 .encourage.fade { opacity: 0; }
@@ -110,27 +150,27 @@ input[type=time]::-webkit-calendar-picker-indicator { filter: invert(0.8); }
 .dots { display: flex; gap: 8px; justify-content: center; margin: 4px 0 10px; flex-wrap: wrap; }
 .dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line); }
 .dot.done { background: var(--good); border-color: var(--good); }
-.dot.now { border-color: var(--calm); }
+.dot.now { border-color: var(--warm); box-shadow: 0 0 8px rgba(255, 210, 122, 0.6); }
 
 .alarm .pulse {
-  width: 150px; height: 150px; border-radius: 50%; margin: 10px auto 24px; background: var(--calm);
-  display: flex; align-items: center; justify-content: center; font-size: 3.4rem;
+  width: 170px; height: 170px; border-radius: 50%; margin: 10px auto 24px;
+  background: url(icon-512.png) center / cover;
   animation: pulse 2.2s ease-in-out infinite;
 }
 @keyframes pulse {
-  0%, 100% { transform: scale(0.92); box-shadow: 0 0 0 0 rgba(185, 168, 255, 0.5); }
-  50% { transform: scale(1); box-shadow: 0 0 0 26px rgba(185, 168, 255, 0); }
+  0%, 100% { transform: scale(0.92); box-shadow: 0 0 0 0 rgba(255, 210, 122, 0.55); }
+  50% { transform: scale(1); box-shadow: 0 0 0 28px rgba(255, 210, 122, 0); }
 }
 @media (prefers-reduced-motion: reduce) { .alarm .pulse { animation: none; } }
 
-.tip { background: var(--card); border-radius: 14px; padding: 12px 14px; font-size: 0.95rem; color: var(--muted); text-align: left; margin: 10px 0; }
+.tip { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; font-size: 0.95rem; color: var(--muted); text-align: left; margin: 10px 0; }
 .tip b { color: var(--text); }
 .actions { margin-top: 8px; }
 
 /* Progress */
 .bars { display: flex; align-items: flex-end; gap: 6px; height: 140px; padding-top: 10px; }
 .bars .col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
-.bars .b { width: 100%; max-width: 40px; background: var(--calm); border-radius: 6px 6px 2px 2px; min-height: 3px; }
+.bars .b { width: 100%; max-width: 40px; background: linear-gradient(180deg, var(--warm), var(--warm-2)); box-shadow: 0 0 10px rgba(255, 210, 122, 0.35); border-radius: 6px 6px 2px 2px; min-height: 3px; }
 .bars .v { font-size: 0.75rem; color: var(--muted); margin-bottom: 3px; }
 .bars .n { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
 .night { border-top: 1px solid var(--line); padding: 12px 0; }

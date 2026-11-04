@@ -1,6 +1,6 @@
 // Offline cache. Bump CACHE whenever any file changes so phones pick up the new version.
-const CACHE = 'sleep-coach-v1';
-const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
+const CACHE = 'sleep-coach-v2';
+const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'scene.jpg',
   'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
