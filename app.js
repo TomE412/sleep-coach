@@ -1,5 +1,5 @@
 // Sleep Coach: a check-in timer for gentle sleep training. Everything is stored on the phone (localStorage).
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const KEY = 'sleepcoach.v1';
 
 const PROGRAMS = [
@@ -45,7 +45,7 @@ const READY = [
   ['feeds', 'No night feeds for at least 7 nights in a row', 'So you know it is not hunger when they cry. Check with your clinic first.'],
   ['crib', '5–10 nights soothing in the cot', 'Settling them without lifting them out at night.'],
   ['team', 'You and your partner agree on the plan', 'Decide who does the check-ins. It can help if it is not the parent who feeds.'],
-  ['ten', 'You are committing to 10 nights', 'Even if it clicks on night 2, keep going for the full 10.']
+  ['ten', 'You are committing to the whole plan', 'Even if it clicks on night 2, keep going every night to the end.']
 ];
 
 /* ---------- storage ---------- */
@@ -57,6 +57,7 @@ S.ready = S.ready || {};
 if (S.checkinSecs == null) S.checkinSecs = 20;
 if (S.sound == null) S.sound = true;
 if (S.vibrate == null) S.vibrate = true;
+if (S.planNights == null) S.planNights = 21;
 
 /* ---------- helpers ---------- */
 const $ = sel => document.querySelector(sel);
@@ -194,7 +195,7 @@ function render() {
   if (!S.program) return programScreen(v, true);
   if (S.live) return sessionScreen(v);
   ({ home: homeScreen, program: programScreen, setup: setupScreen, progress: progressScreen,
-     ready: readyScreen, settings: settingsScreen, morning: morningScreen }[screen] || homeScreen)(v, false);
+     ready: readyScreen, settings: settingsScreen, morning: morningScreen, report: reportScreen }[screen] || homeScreen)(v, false);
 }
 
 function header(title, back = 'home') {
@@ -273,10 +274,23 @@ function homeScreen(v) {
   const n = S.nights.length + 1;
   const done = READY.filter(r => S.ready[r[0]]).length;
   const hours = nightHours();
+  if (S.finished) {
+    v.innerHTML = `
+      <img class="scene" src="scene.jpg" alt="A child plays a flute to a smiling moon and stars">
+      <div class="hero over"><h1>The plan is finished</h1>
+        <p class="muted">${S.nights.length} nights with ${esc(name())}. Well done, both of you.</p></div>
+      <button class="btn primary big" data-go="report">See the final report</button>
+      <button class="btn" id="again">Start a new plan</button>
+      <div class="links"><button data-go="progress"><span>📈</span>Progress</button>
+        <button data-go="ready"><span>✅</span>Checklist</button><button data-go="settings"><span>⚙️</span>Settings</button></div>`;
+    $('#again').onclick = newPlan;
+    return bindGo(v);
+  }
+  const planDone = n > planLen();
   v.innerHTML = `
     <img class="scene" src="scene.jpg" alt="A child plays a flute to a smiling moon and stars">
     <div class="hero over">
-      <h1>Tonight is night ${n}${n <= 10 ? ' of 10' : ''}</h1>
+      <h1>Tonight is night ${n}${planDone ? '' : ' of ' + planLen()}</h1>
       <p class="muted">for ${esc(name())}</p>
       <div class="chips">
         <span class="chip">Bed <b>${S.baby.bed}</b></span>
@@ -287,6 +301,8 @@ function homeScreen(v) {
     </div>
     <div class="tip"><b>Put ${esc(name())} down drowsy but awake</b>, a pat, dummy if used, and leave.
       Press the button as you walk out. The first wait is ${minsFor(0)} minutes.</div>
+    ${planDone ? `<div class="tip"><b>You've reached the end of your ${planLen()}-night plan.</b> Have a look at the report,
+      or keep tracking if you'd like.</div><button class="btn calm" data-go="report">See the report</button>` : ''}
     <button class="btn primary big" id="start">Start bedtime</button>
     <div class="links">
       <button data-go="ready"><span>✅</span>Ready? ${done}/${READY.length}</button>
@@ -390,6 +406,8 @@ function sessionScreen(v) {
       <p class="muted">${L.phase === 'asleep'
         ? `Crying took about ${cm} min with ${w.checks.length} check-in${w.checks.length === 1 ? '' : 's'}. Go and rest.`
         : `Settle ${esc(name())}, then lay them back down drowsy but awake. Tomorrow is a new night.`}</p>
+      <div class="since"><div class="clock" id="since">0m</div><div class="clock-sub" id="sincesub">asleep since ${clock(w.asleep)}</div></div>
+      ${liveNight().wakings.length > 1 ? `<p class="small muted">Wakings tonight: ${liveNight().wakings.length - 1}</p>` : ''}
       ${morning ? `<p class="warn">It's past ${S.baby.wake}. Good morning! Finish the night below.</p>` : ''}</div>
       <div class="actions">
         <button class="btn calm big" id="woke">${esc(name())} woke up</button>
@@ -439,6 +457,9 @@ function tick() {
     const sub = $('#clksub'); if (sub) sub.textContent = secs >= target ? 'time to leave' : 'in the room';
     const bar = $('#bar'); if (bar) bar.setAttribute('stroke-dashoffset', RING * (1 - Math.min(1, secs / target)));
     if (secs >= target && !L.toldOut) { L.toldOut = true; if (S.vibrate && navigator.vibrate) navigator.vibrate(80); }
+  } else if (L.phase === 'asleep' || L.phase === 'picked') {
+    const w = liveWaking(), el = $('#since');
+    if (el && w.asleep) el.textContent = hm((now - w.asleep) / 60000).replace(' min', 'm');
   }
 }
 setInterval(tick, 250);
@@ -451,15 +472,18 @@ document.addEventListener('pointerdown', unlockAudio, { passive: true });
 function morningScreen(v, _f) {
   const n = S.nights[screenArg];
   if (!n) return go('home');
+  const s = stats(n), ns = doneNights();
   v.innerHTML = `
     <div class="hero"><div class="moon">☀️</div><h1>Good morning!</h1>
-      <p class="muted">Night ${screenArg + 1} is done. Be proud of yourselves.</p></div>
+      <p class="muted">Night ${screenArg + 1} of ${planLen()} is done. ${s.through ? `⭐ ${esc(name())} slept through!` : 'Be proud of yourselves.'}</p></div>
     <div class="card">
       <div class="chips">
-        <span class="chip">Wakings <b>${Math.max(0, n.wakings.length - 1)}</b></span>
-        <span class="chip">Check-ins <b>${nightChecks(n)}</b></span>
-        <span class="chip">Crying <b>${nightCryMin(n)} min</b></span>
+        <span class="chip">Settled in <b>${hm(s.settle)}</b></span>
+        <span class="chip">Wakings <b>${s.wakings}</b></span>
+        <span class="chip">Awake <b>${hm(s.awake)}</b></span>
+        <span class="chip">Longest sleep <b>${hm(s.longest * 60)}</b></span>
       </div>
+      ${ns.length >= 2 ? `${trendChart(METRICS[0], ns)}<p class="small">${trendWords(METRICS[0], ns)}</p>` : ''}
     </div>
     <div class="tip"><b>Make the morning bright.</b> If ${esc(name())} is crying, wait for a calmer moment before you go in,
       so crying doesn't become the way out of the cot. Then open the curtains, sing, get some fresh air. Morning is fun; night is for sleep.</div>
@@ -468,25 +492,248 @@ function morningScreen(v, _f) {
   bindGo(v);
 }
 
+/* ---------- tracking: per-night numbers, trend lines, the awake-window map and the report ---------- */
+const METRICS = [
+  { k: 'awake', label: 'Awake time', short: 'Awake', unit: 'min', better: 'down', fmt: v => Math.round(v) + ' min' },
+  { k: 'wakings', label: 'Night wakings', short: 'Wakings', unit: '', better: 'down', fmt: v => (Math.round(v * 10) / 10) + '' },
+  { k: 'settle', label: 'Settling at bedtime', short: 'Settling', unit: 'min', better: 'down', fmt: v => Math.round(v) + ' min' },
+  { k: 'longest', label: 'Longest sleep', short: 'Longest', unit: 'h', better: 'up', fmt: v => hm(v * 60) }
+];
+const hm = m => { m = Math.round(m); return m < 60 ? m + ' min' : Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm'; };
+const doneNights = () => S.nights.filter(n => n.ended);
+const planLen = () => S.planNights || 21;
+
+function stats(n) {
+  const ws = n.wakings, end = n.ended || Date.now();
+  const bed = ws[0];
+  let longest = 0;
+  ws.forEach((w, i) => {
+    if (!w.asleep) return;
+    const to = ws[i + 1] ? ws[i + 1].start : end;
+    longest = Math.max(longest, to - w.asleep);
+  });
+  const wakings = Math.max(0, ws.length - 1);
+  const pickedUp = ws.some(w => w.pickedUp);
+  return {
+    awake: ws.reduce((a, w) => a + ((w.asleep || end) - w.start), 0) / 60000,
+    wakings,
+    settle: bed ? ((bed.asleep || end) - bed.start) / 60000 : 0,
+    longest: longest / 3600000,
+    checks: nightChecks(n),
+    through: wakings === 0 && !pickedUp,
+    pickedUp
+  };
+}
+
+// Straight line of best fit through the nightly values.
+function fitLine(pts) {
+  if (pts.length < 2) return null;
+  const n = pts.length, mx = pts.reduce((a, p) => a + p.x, 0) / n, my = pts.reduce((a, p) => a + p.y, 0) / n;
+  let num = 0, den = 0;
+  pts.forEach(p => { num += (p.x - mx) * (p.y - my); den += (p.x - mx) ** 2; });
+  const slope = den ? num / den : 0;
+  return { slope, at: x => my + slope * (x - mx) };
+}
+function niceMax(v, unit) {
+  if (unit === 'h') return Math.max(2, Math.ceil(v / 2) * 2);
+  if (v <= 4) return Math.max(1, Math.ceil(v));
+  if (v <= 60) return Math.ceil(v / 10) * 10;
+  return Math.ceil(v / 30) * 30;
+}
+
+function trendChart(metric, ns) {
+  const pts = ns.map((n, i) => ({ x: i + 1, y: stats(n)[metric.k] }));
+  const slots = Math.max(planLen(), pts.length);
+  const W = 340, H = 180, L = 34, R = 8, T = 12, B = 26, pw = W - L - R, ph = H - T - B;
+  const max = niceMax(Math.max(0, ...pts.map(p => p.y)), metric.unit);
+  const x = i => L + (i - 0.5) / slots * pw, y = v => T + ph - Math.min(v, max) / max * ph;
+  const bw = Math.max(3, Math.min(14, pw / slots * 0.62));
+  const lab = v => metric.unit === 'h' ? v + 'h' : v + '';
+  let g = '';
+  for (const v of [0, max / 2, max]) {
+    g += `<line class="ch-grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/>
+      <text class="ch-txt" x="${L - 6}" y="${y(v) + 3.5}" text-anchor="end">${lab(Math.round(v * 10) / 10)}</text>`;
+  }
+  for (let i = 1; i <= slots; i++) {
+    const p = pts[i - 1];
+    if (p) g += `<rect class="ch-bar" x="${x(i) - bw / 2}" y="${y(p.y)}" width="${bw}" height="${Math.max(1.5, T + ph - y(p.y))}" rx="2"><title>Night ${i}: ${metric.fmt(p.y)}</title></rect>`;
+    else g += `<circle class="ch-todo" cx="${x(i)}" cy="${T + ph - 2}" r="1.6"/>`;
+    if (i === 1 || i % 7 === 0 || i === slots) g += `<text class="ch-txt" x="${x(i)}" y="${H - 8}" text-anchor="middle">${i}</text>`;
+  }
+  const f = fitLine(pts);
+  if (f) {
+    const x1 = 1, x2 = pts.length;
+    g += `<line class="ch-trend" x1="${x(x1)}" y1="${y(Math.max(0, f.at(x1)))}" x2="${x(x2)}" y2="${y(Math.max(0, f.at(x2)))}"/>`;
+  }
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${metric.label} per night with trend line">${g}</svg>`;
+}
+
+function trendWords(metric, ns) {
+  const f = fitLine(ns.map((n, i) => ({ x: i + 1, y: stats(n)[metric.k] })));
+  if (!f) return 'The trend line appears after 2 nights.';
+  const per = metric.k === 'longest' ? f.slope * 60 : f.slope;   // longest: minutes per night
+  const size = Math.abs(per);
+  const unit = metric.k === 'wakings' ? 'wakings' : 'min';
+  if (size < (metric.k === 'wakings' ? 0.05 : 0.5)) return 'Holding steady.';
+  const good = (per < 0) === (metric.better === 'down');
+  const amt = metric.k === 'wakings' ? (Math.round(size * 10) / 10) + ' ' + unit : Math.round(size) + ' ' + unit;
+  return `${good ? '👍 ' : ''}${per < 0 ? 'Going down' : 'Going up'} by about ${amt} a night${good ? '' : ' (not the way we want yet)'}.`;
+}
+
+// One row per night, from just before bedtime to after awake time. Gold = awake, blue = asleep.
+function sleepMap(ns, first) {
+  if (!ns.length) return '';
+  const bedMin = toMin(S.baby.bed), spanMin = nightHours() * 60 + 90;
+  const W = 340, L = 26, R = 6, T = 18, rowH = 10, gap = 4, pw = W - L - R;
+  const H = T + ns.length * (rowH + gap) + 4;
+  const X = (t, b) => L + Math.max(0, Math.min(1, (t - b) / (spanMin * 60000))) * pw;
+  let g = '';
+  const tick = (min, text) => {
+    const px = L + min / spanMin * pw;
+    g += `<line class="ch-grid" x1="${px}" x2="${px}" y1="${T - 4}" y2="${H}"/><text class="ch-txt" x="${px}" y="${T - 7}" text-anchor="middle">${text}</text>`;
+  };
+  tick(30, S.baby.bed);
+  const toMidnight = 1440 - (bedMin - 30);
+  if (toMidnight > 60 && toMidnight < spanMin - 60) tick(toMidnight, '00:00');
+  tick(30 + nightHours() * 60, S.baby.wake);
+  ns.forEach((n, r) => {
+    const d = new Date(n.started); d.setHours(0, 0, 0, 0);
+    let b = d.getTime() + (bedMin - 30) * 60000;
+    if (n.started - b < -12 * 3600000) b -= 86400000;   // started after midnight: belongs to the night before
+    const yy = T + r * (rowH + gap), end = n.ended || Date.now();
+    g += `<text class="ch-txt" x="${L - 5}" y="${yy + rowH - 1.5}" text-anchor="end">${first + r}</text>`;
+    g += `<rect class="ch-row" x="${L}" y="${yy}" width="${pw}" height="${rowH}" rx="3"/>`;
+    n.wakings.forEach((w, i) => {
+      if (w.asleep) {
+        const to = n.wakings[i + 1] ? n.wakings[i + 1].start : end;
+        g += `<rect class="ch-sleep" x="${X(w.asleep, b)}" y="${yy}" width="${Math.max(0, X(to, b) - X(w.asleep, b))}" height="${rowH}" rx="2"/>`;
+      }
+      const a = X(w.start, b), z = X(w.asleep || end, b);
+      g += `<rect class="${w.pickedUp ? 'ch-picked' : 'ch-awake'}" x="${a}" y="${yy}" width="${Math.max(2, z - a)}" height="${rowH}" rx="2"><title>Awake ${clock(w.start)} for ${hm(((w.asleep || end) - w.start) / 60000)}</title></rect>`;
+    });
+  });
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Awake and asleep times for each night">${g}</svg>
+    <div class="legend"><span><i class="sw ch-sleep"></i>Asleep</span><span><i class="sw ch-awake"></i>Awake / crying</span><span><i class="sw ch-picked"></i>Picked up</span></div>`;
+}
+
+let progMetric = 'awake', showAll = false;
 function progressScreen(v) {
-  const ns = S.nights;
-  const maxCry = Math.max(1, ...ns.map(nightCryMin));
-  const shown = ns.slice(-10);
-  const offset = ns.length - shown.length;
+  const ns = doneNights();
+  const live = S.nights.filter(n => !n.ended).length;
+  const m = METRICS.find(x => x.k === progMetric);
+  const last = ns[ns.length - 1], ls = last && stats(last);
+  const through = ns.filter(n => stats(n).through).length;
   v.innerHTML = `${header('Progress')}
-    ${ns.length ? `<div class="card"><h2>Minutes of crying per night</h2>
-      <div class="bars">${shown.map((n, i) => { const c = nightCryMin(n); return `<div class="col"><div class="v">${c}</div>
-        <div class="b" style="height:${Math.round(c / maxCry * 100)}%"></div><div class="n">${offset + i + 1}</div></div>`; }).join('')}</div>
-      <p class="small muted">Night number along the bottom. It usually drops fast after the first few nights.</p></div>
-      <div class="card">${ns.map((n, i) => ({ n, i })).reverse().map(({ n, i }) => `<div class="night">
-        <h3>Night ${i + 1} · ${day(n.started)}</h3>
-        <div class="small muted">Down at ${clock(n.started)} · ${nightChecks(n)} check-ins · ${nightCryMin(n)} min crying${n.ended ? '' : ' · in progress'}</div>
+    ${ns.length ? `
+    <div class="chips">
+      <span class="chip">Night <b>${ns.length}</b> of ${planLen()}</span>
+      <span class="chip">Slept through <b>${through}</b></span>
+    </div>
+    <div class="card">
+      <div class="seg">${METRICS.map(x => `<button data-m="${x.k}" class="${x.k === progMetric ? 'on' : ''}">${x.short}</button>`).join('')}</div>
+      <h2>${m.label} each night</h2>
+      ${trendChart(m, ns)}
+      <p class="small"><span class="key-trend"></span> ${trendWords(m, ns)}</p>
+      ${ls ? `<p class="small muted">Last night: ${m.fmt(ls[m.k])}</p>` : ''}
+    </div>
+    <div class="card">
+      <h2>Awake windows</h2>
+      <p class="small muted">Each row is a night. Watch the gold shrink as ${esc(name())} learns.</p>
+      ${sleepMap(ns.slice(-planLen()), Math.max(1, ns.length - planLen() + 1))}
+    </div>
+    <button class="btn primary" id="rep">Get my report</button>
+    <h2>Night by night</h2><div class="card">${ns.map((n, i) => ({ n, i })).reverse().slice(0, showAll ? undefined : 5).map(({ n, i }) => { const s = stats(n); return `<div class="night">
+        <h3>Night ${i + 1} · ${day(n.started)}${s.through ? ' · ⭐ slept through' : ''}</h3>
+        <div class="small muted">Down ${clock(n.started)} · settled in ${hm(s.settle)} · ${s.wakings} waking${s.wakings === 1 ? '' : 's'} · awake ${hm(s.awake)} · longest sleep ${hm(s.longest * 60)}</div>
         ${n.wakings.map((w, j) => `<div class="waking"><span style="min-width:74px">${j ? 'Waking ' + j : 'Bedtime'} ${clock(w.start)}</span>
           <span class="dots">${w.checks.map(() => '<span class="dot done"></span>').join('') || '<span class="small">no check-ins</span>'}</span>
           <span>${Math.round(cryMs(w) / 60000)} min${w.pickedUp ? ' · picked up' : ''}</span></div>`).join('')}
-      </div>`).join('')}</div>`
-    : `<div class="card center"><p>No nights yet.</p><p class="muted small">After each night you'll see wakings, check-ins and how long the crying lasted.</p></div>`}`;
+      </div>`; }).join('')}</div>${ns.length > 5 ? `<button class="btn ghost" id="all">${showAll ? 'Show fewer' : 'Show all ' + ns.length + ' nights'}</button>` : ''}`
+    : `<div class="card center"><p>No finished nights yet${live ? ' (tonight is still going)' : ''}.</p>
+        <p class="muted small">After each night you'll see a trend line for awake time, wakings, settling and the longest sleep, plus a map of the awake windows.</p></div>`}`;
+  v.querySelectorAll('[data-m]').forEach(b => b.onclick = () => { progMetric = b.dataset.m; render(); });
+  const all = $('#all'); if (all) all.onclick = () => { showAll = !showAll; render(); };
+  const rep = $('#rep'); if (rep) rep.onclick = () => go('report');
   bindGo(v);
+}
+
+/* ---------- the report: start of the plan compared with the latest nights ---------- */
+function compare(ns) {
+  const k = Math.max(1, Math.min(3, Math.floor(ns.length / 2)));
+  const avg = (arr, key) => arr.reduce((a, n) => a + stats(n)[key], 0) / arr.length;
+  const a = ns.slice(0, k), z = ns.slice(-k);
+  return { k, rows: METRICS.map(m => ({ m, from: avg(a, m.k), to: avg(z, m.k) })) };
+}
+function reportData() {
+  const ns = doneNights();
+  const st = ns.map(stats);
+  const throughIdx = st.findIndex(s => s.through);
+  let streak = 0; for (let i = st.length - 1; i >= 0 && st[i].through; i--) streak++;
+  const c = ns.length >= 2 ? compare(ns) : null;
+  const awake = c && c.rows[0];
+  let verdict;
+  if (!c) verdict = 'Finish at least 2 nights to see a comparison.';
+  else if (awake.to <= awake.from * 0.5 || streak >= 3) verdict = `Wonderful progress. ${name()} has learned to settle. Keep the same bedtime and routine.`;
+  else if (awake.to < awake.from) verdict = `Getting there. Awake time is coming down. Stay consistent; it usually keeps improving.`;
+  else verdict = `Not improving yet. Be honest about whether every night followed the plan, since giving in restarts the lesson. If you have been consistent, check with your doctor that nothing else is going on.`;
+  return { ns, st, throughIdx, streak, c, verdict };
+}
+function reportText(r) {
+  const lines = [`Sleep Coach report for ${name()}`,
+    `${r.ns.length} night${r.ns.length === 1 ? '' : 's'}${r.ns.length ? ' (' + day(r.ns[0].started) + ' to ' + day(r.ns[r.ns.length - 1].started) + ')' : ''}, program ${programLabel(S.program)}`];
+  if (r.c) {
+    lines.push(`First ${r.c.k} nights vs last ${r.c.k} nights:`);
+    r.c.rows.forEach(({ m, from, to }) => lines.push(`- ${m.label}: ${m.fmt(from)} to ${m.fmt(to)}`));
+  }
+  lines.push(`Slept through: ${r.st.filter(s => s.through).length} of ${r.ns.length} nights${r.throughIdx >= 0 ? ' (first on night ' + (r.throughIdx + 1) + ')' : ''}`);
+  lines.push(r.verdict);
+  return lines.join('\n');
+}
+function reportScreen(v) {
+  const r = reportData();
+  const finished = !!S.finished;
+  v.innerHTML = `${header(finished ? 'Final report' : 'Report', finished ? 'home' : 'progress')}
+    <div class="hero"><img class="moon-img" src="icon-192.png" alt="">
+      <h1>${esc(name())}'s sleep report</h1>
+      <p class="muted">${r.ns.length} night${r.ns.length === 1 ? '' : 's'} of ${planLen()}${r.ns.length ? ' · ' + day(r.ns[0].started) + ' to ' + day(r.ns[r.ns.length - 1].started) : ''}</p></div>
+    <div class="card"><p class="verdict">${esc(r.verdict)}</p></div>
+    ${r.c ? `<div class="card"><h2>Start vs now</h2>
+      <p class="small muted">Average of the first ${r.c.k} night${r.c.k === 1 ? '' : 's'} compared with the last ${r.c.k}.</p>
+      <table class="cmp"><tbody>${r.c.rows.map(({ m, from, to }) => {
+        const good = m.better === 'down' ? to < from : to > from, same = Math.abs(to - from) < 0.05;
+        const pct = from > 0 ? Math.round((to - from) / from * 100) : null;
+        return `<tr><th>${m.label}</th><td>${m.fmt(from)}</td><td class="arrow">→</td><td><b>${m.fmt(to)}</b></td>
+          <td class="${same ? '' : good ? 'up' : 'down'}">${pct == null || same ? '' : (pct > 0 ? '+' : '') + pct + '%'}</td></tr>`;
+      }).join('')}</tbody></table></div>` : ''}
+    <div class="card">
+      <div class="chips">
+        <span class="chip">Slept through <b>${r.st.filter(s => s.through).length}</b> nights</span>
+        ${r.throughIdx >= 0 ? `<span class="chip">First time <b>night ${r.throughIdx + 1}</b></span>` : ''}
+        <span class="chip">Current streak <b>${r.streak}</b></span>
+        <span class="chip">Check-ins <b>${r.st.reduce((a, s) => a + s.checks, 0)}</b></span>
+      </div>
+    </div>
+    ${r.ns.length ? `<div class="card"><h2>Awake time trend</h2>${trendChart(METRICS[0], r.ns)}<p class="small">${trendWords(METRICS[0], r.ns)}</p></div>
+      <div class="card"><h2>Awake windows</h2>${sleepMap(r.ns.slice(-planLen()), Math.max(1, r.ns.length - planLen() + 1))}</div>` : ''}
+    <button class="btn primary" id="share">Share report</button>
+    ${finished ? `<button class="btn" id="again">Start a new plan</button>` : `<button class="btn ghost" id="stop">Stop the Sleep Coach and keep this as the final report</button>`}`;
+  $('#share').onclick = async () => {
+    const text = reportText(r);
+    try { if (navigator.share) return await navigator.share({ title: 'Sleep Coach report', text }); } catch (e) { return; }
+    try { await navigator.clipboard.writeText(text); $('#share').textContent = 'Copied. Paste it into WhatsApp or email'; }
+    catch (e) { alert(text); }
+  };
+  const stop = $('#stop'); if (stop) stop.onclick = stopCoach;
+  const again = $('#again'); if (again) again.onclick = newPlan;
+  bindGo(v);
+}
+function stopCoach() {
+  if (!confirm('Stop the Sleep Coach? Your nights are kept and this becomes the final report.')) return;
+  S.finished = Date.now(); save(); go('report');
+}
+function newPlan() {
+  if (!confirm('Start a new plan? This clears the nights in Progress. Share the report first if you want to keep it.')) return;
+  S.nights = []; S.finished = null; save(); go('home');
 }
 
 function readyScreen(v) {
@@ -516,7 +763,14 @@ function settingsScreen(v) {
       <p class="small muted">Turn your phone's volume up a little to test. iPhones don't vibrate from web apps, and the silent switch mutes the sound.</p>
     </div>
     <div class="card">
-      <button class="btn ghost" id="wipe">Clear progress (start a new 10 nights)</button>
+      <h2>Plan length</h2>
+      <div class="seg">${[10, 14, 21, 28].map(d => `<button data-plan="${d}" class="${planLen() === d ? 'on' : ''}">${d} nights</button>`).join('')}</div>
+      <p class="small muted">The trend line and report are measured over this many nights.</p>
+      <button class="btn" data-go="report">Get my report</button>
+      ${S.finished ? '' : `<button class="btn ghost" id="stop">Stop the Sleep Coach (final report)</button>`}
+    </div>
+    <div class="card">
+      <button class="btn ghost" id="wipe">Clear progress (start a new plan)</button>
       <button class="btn ghost" id="reset">Reset everything</button>
     </div>
     <p class="small muted center">Sleep Coach v${APP_VERSION}. Everything stays on this phone and works offline.<br>
@@ -524,7 +778,9 @@ function settingsScreen(v) {
   $('#snd').onchange = e => { S.sound = e.target.checked; save(); };
   $('#vib').onchange = e => { S.vibrate = e.target.checked; save(); };
   $('#test').onclick = () => { unlockAudio(); setTimeout(psst, 60); };
-  $('#wipe').onclick = () => { if (confirm('Delete all nights from Progress?')) { S.nights = []; save(); render(); } };
+  v.querySelectorAll('[data-plan]').forEach(b => b.onclick = () => { S.planNights = +b.dataset.plan; save(); render(); });
+  const stop = $('#stop'); if (stop) stop.onclick = stopCoach;
+  $('#wipe').onclick = () => { if (confirm('Delete all nights from Progress?')) { S.nights = []; S.finished = null; save(); render(); } };
   $('#reset').onclick = () => { if (confirm('Delete the baby details, program and all progress?')) { try { localStorage.removeItem(KEY); } catch (e) {} location.reload(); } };
   bindGo(v);
 }

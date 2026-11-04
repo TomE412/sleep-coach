@@ -4,6 +4,7 @@ An offline phone app (PWA) for gentle sleep training: a soft check-in timer with
 
 - Plain static files, no build step: `index.html`, `style.css`, `app.js`, `sw.js`.
 - Everything is saved on the phone (localStorage key `sleepcoach.v1`). No server, no accounts.
+- Tracking: plan length 10/14/21/28 nights (default 21). Progress shows a trend line (least-squares fit) for awake time, wakings, settling and longest sleep, plus an awake-window map. Report compares the first 3 nights with the last 3; "Stop the Sleep Coach" sets `finished` and freezes it as the final report.
 - Programs: 4·8·12, 8·8·12·12, 12·12·12, or custom minutes. After the last check-in the parent may pick the baby up, or do one more wait.
 - Alert is a synthesised soft "psst" plus vibration, repeated every 10 s until "Going in" is tapped. The screen is kept awake (Wake Lock) during a session; timing runs from timestamps, so it catches up if the phone sleeps.
 - Method notes are paraphrased from Katie Bunton's "How I Gently Sleep Trained" (paid guide). Do not copy its text into the app or the repo.

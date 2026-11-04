@@ -190,3 +190,35 @@ input[type=time]::-webkit-calendar-picker-indicator { filter: invert(0.8); }
 .toggle { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
 .toggle:first-of-type { border-top: 0; }
 .toggle input { width: 24px; height: 24px; accent-color: var(--warm); }
+
+/* Charts: gold bars and awake windows, lavender trend line, blue sleep. */
+.chart { width: 100%; height: auto; display: block; margin: 6px 0; overflow: visible; }
+.ch-grid { stroke: var(--line); stroke-width: 1; }
+.ch-txt { fill: var(--muted); font-size: 10px; font-family: inherit; }
+.ch-bar { fill: var(--warm); opacity: 0.9; }
+.ch-todo { fill: var(--line); }
+.ch-trend { stroke: var(--calm); stroke-width: 3; stroke-dasharray: 7 5; stroke-linecap: round; filter: drop-shadow(0 0 4px rgba(169, 155, 255, 0.7)); }
+.ch-row { fill: rgba(255, 255, 255, 0.04); }
+.ch-sleep { fill: #4a5fc4; }
+.ch-awake { fill: var(--warm); }
+.ch-picked { fill: var(--red); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.82rem; color: var(--muted); margin-top: 4px; }
+.legend .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.legend .sw.ch-sleep { background: #4a5fc4; }
+.legend .sw.ch-awake { background: var(--warm); }
+.legend .sw.ch-picked { background: var(--red); }
+.key-trend { display: inline-block; width: 22px; border-top: 3px dashed var(--calm); vertical-align: middle; margin-right: 4px; }
+
+.seg { display: flex; gap: 6px; background: rgba(0, 0, 0, 0.2); border-radius: 14px; padding: 4px; margin-bottom: 6px; }
+.seg button { flex: 1; font: inherit; font-size: 0.85rem; color: var(--muted); background: none; border: 0; border-radius: 10px; padding: 9px 4px; cursor: pointer; }
+.seg button.on { background: var(--warm); color: var(--warm-ink); font-weight: 650; }
+
+.verdict { font-size: 1.1rem; margin: 0; color: #fff1cf; }
+.cmp { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+.cmp th { text-align: left; font-weight: 500; color: var(--muted); padding: 8px 4px 8px 0; }
+.cmp td { padding: 8px 2px; white-space: nowrap; text-align: right; }
+.cmp tr + tr th, .cmp tr + tr td { border-top: 1px solid var(--line); }
+.cmp .arrow { color: var(--muted); text-align: center; }
+.cmp .up { color: var(--good); font-weight: 650; }
+.cmp .down { color: #ff9c8f; font-weight: 650; }
+.since { margin: 14px 0 6px; }
