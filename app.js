@@ -1,5 +1,5 @@
 // Sleep Coach: a check-in timer for gentle sleep training. Everything is stored on the phone (localStorage).
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '2.0.0';
 const KEY = 'sleepcoach.v1';
 
 const PROGRAMS = [
@@ -54,6 +54,7 @@ function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e
 let S = load() || {};
 S.nights = S.nights || [];
 S.ready = S.ready || {};
+S.notes = S.notes || [];
 if (S.checkinSecs == null) S.checkinSecs = 20;
 if (S.sound == null) S.sound = true;
 if (S.vibrate == null) S.vibrate = true;
@@ -221,36 +222,68 @@ function notify(title, body) {
   } catch (e) {}
 }
 
+/* ---------- sleeps: a night or a day nap ---------- */
+const isNap = s => s.kind === 'nap';
+const nightNo = s => S.nights.filter(x => !isNap(x) && x.started <= s.started).length;
+const nightsSoFar = () => S.nights.filter(x => !isNap(x)).length;
+const sessionTitle = s => isNap(s) ? 'Nap · ' + day(s.started) : 'Night ' + nightNo(s);
+// The night window runs from bedtime to awake time; anything started outside it is a day nap.
+// Putting the baby down up to 30 minutes before bedtime still counts as the night.
+function isNightTime(t = Date.now()) {
+  const d = new Date(t), m = d.getHours() * 60 + d.getMinutes();
+  const bed = (toMin(S.baby.bed) - 30 + 1440) % 1440, wake = toMin(S.baby.wake);
+  return bed < wake ? (m >= bed && m < wake) : (m >= bed || m < wake);
+}
+// "19:05" typed in -> today at 19:05, or yesterday if that would be in the future.
+function timeToday(hhmm) {
+  const d = new Date(), [h, m] = hhmm.split(':').map(Number);
+  d.setHours(h, m, 0, 0);
+  if (d.getTime() > Date.now() + 60000) d.setDate(d.getDate() - 1);
+  return d.getTime();
+}
+const hhmmOf = t => { const d = new Date(t); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+
 /* ---------- session actions ---------- */
-function startNight() {
+function startSession(kind, opts = {}) {
   unlockAudio(); keepAwake();
   try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch (e) {}
-  S.nights.push({ started: Date.now(), ended: null, program: mins().slice(), wakings: [] });
+  const t = opts.putDown || Date.now();
+  S.nights.push({ kind, started: t, ended: null, program: mins().slice(), wakings: [], notes: [] });
   S.live = { night: S.nights.length - 1 };
-  beginWaking();
+  screen = 'session';
+  if (opts.takeover) {
+    liveNight().wakings.push({ start: t, asleep: null, pickedUp: false, checks: Array(opts.checks).fill(null) });
+    liveNight().notes.push({ t: Date.now(), text: opts.note, auto: true });
+    S.live.step = opts.checks;
+    resumeWait(opts.waitFrom);
+  } else beginWaking();
 }
 function beginWaking() {
   liveNight().wakings.push({ start: Date.now(), asleep: null, pickedUp: false, checks: [] });
   S.live.step = 0;
   startWait();
 }
-function startWait() {
+function startWait() { resumeWait(Date.now()); }
+function resumeWait(from) {
   unlockAudio(); keepAwake();
   S.live.phase = 'wait';
-  S.live.from = Date.now();
-  S.live.ends = Date.now() + minsFor(S.live.step) * 60000;
-  startTrack(S.live.ends - Date.now(), 'Next check-in at ' + clock(S.live.ends));
+  S.live.from = from;
+  S.live.ends = from + minsFor(S.live.step) * 60000;
+  if (S.live.ends > Date.now()) startTrack(S.live.ends - Date.now(), 'Next check-in at ' + clock(S.live.ends));
   save(); render();
 }
 function fireAlarm() {
   S.live.phase = 'alarm'; S.live.from = Date.now(); save();
   trackPlaying() ? buzz() : psst(); lastPsst = Date.now();
   if (document.visibilityState !== 'visible') notify('Time to check on ' + name(), 'Go in for a short, calm check-in.');
+  if (!sheetOpen()) screen = 'session';     // come back to the timer, unless a note is being typed
   render();
 }
 function goIn() { unlockAudio(); stopTrack(); S.live.toldOut = false; S.live.phase = 'checkin'; S.live.from = Date.now(); save(); render(); }
 function leftRoom() {
-  liveWaking().checks.push(Math.round((Date.now() - S.live.from) / 1000));
+  const w = liveWaking();
+  w.checks.push(Math.round((Date.now() - S.live.from) / 1000));
+  (w.checkAt = w.checkAt || []).push(S.live.from);
   S.live.phase = S.live.step >= mins().length - 1 ? 'final' : 'ready';
   if (S.live.phase === 'ready') S.live.step++;
   save(); render();
@@ -266,7 +299,60 @@ function finishNight() {
   const n = liveNight(); n.ended = Date.now();
   const w = liveWaking(); if (w && !w.asleep) w.asleep = Date.now();
   S.live = null; save(); letSleep();
-  go('morning', S.nights.length - 1);
+  go('morning', S.nights.indexOf(n));
+}
+function tapOut() {
+  const n = liveNight();
+  sheet(`<h2>Tap out ${isNap(n) ? 'of this nap' : 'for tonight'}?</h2>
+    <p class="muted">That's okay. You can bring ${esc(name())} in with you and pick this up again ${isNap(n) ? 'at the next sleep' : 'tomorrow'}.</p>
+    <button class="btn red big" id="tapyes">Yes, tap out</button>
+    <button class="btn" id="tapno">Keep going</button>`);
+  $('#tapno').onclick = closeSheet;
+  $('#tapyes').onclick = () => {
+    closeSheet(); stopTrack();
+    const w = liveWaking(), now = Date.now();
+    if (w && !w.asleep) w.tappedOut = true;
+    n.tappedOut = now; n.ended = now;
+    S.live = null; save(); letSleep();
+    go('tappedout', S.nights.indexOf(n));
+  };
+}
+
+/* ---------- notes, the bottom sheet and a small toast ---------- */
+const QUICK = ['Crying hard', 'Not sure what to do', 'Seems unwell or hot', 'Teething?', 'Might be hungry', 'Partner took over', 'Settled quickly'];
+function sheet(html) {
+  const el = $('#sheet');
+  el.innerHTML = `<div class="sheet-bg"></div><div class="sheet-box" role="dialog" aria-modal="true">${html}</div>`;
+  el.hidden = false;
+  el.querySelector('.sheet-bg').onclick = closeSheet;
+}
+function closeSheet() { const el = $('#sheet'); el.hidden = true; el.innerHTML = ''; }
+const sheetOpen = () => !$('#sheet').hidden;
+function toast(msg) {
+  const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
+  document.body.appendChild(t); setTimeout(() => t.remove(), 2200);
+}
+// A note goes on the sleep that is running (or the one passed in), otherwise into the general notes.
+function openNote(target) {
+  target = target || (S.live ? liveNight() : null);
+  sheet(`<h2>Add a note</h2>
+    <p class="small muted">${target ? 'Saved with ' + esc(sessionTitle(target)) : 'Saved with the date'} at ${clock(Date.now())}.</p>
+    <div class="quick">${QUICK.map(q => `<button data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>
+    <textarea id="notetxt" rows="4" placeholder="What's happening? e.g. crying like mad and I'm not sure what to do"></textarea>
+    <button class="btn primary" id="notesave">Save note</button>
+    <button class="btn ghost" id="noteno">Cancel</button>`);
+  const ta = $('#notetxt');
+  $('#sheet').querySelectorAll('[data-q]').forEach(b => b.onclick = () => {
+    ta.value = (ta.value.trim() ? ta.value.trim() + '. ' : '') + b.dataset.q; ta.focus();
+  });
+  $('#noteno').onclick = closeSheet;
+  $('#notesave').onclick = () => {
+    const text = ta.value.trim();
+    if (!text) { ta.focus(); return; }
+    const note = { t: Date.now(), text };
+    if (target) (target.notes = target.notes || []).push(note); else S.notes.push(note);
+    save(); closeSheet(); toast('Note saved'); render();
+  };
 }
 
 /* ---------- screens ---------- */
@@ -276,11 +362,35 @@ function go(s, arg) { screen = s; screenArg = arg; render(); window.scrollTo(0, 
 function render() {
   clearInterval(rotateTimer); rotateTimer = null;
   const v = $('#view');
-  if (!S.baby) return setupScreen(v);
-  if (!S.program) return programScreen(v, true);
-  if (S.live) return sessionScreen(v);
-  ({ home: homeScreen, program: programScreen, setup: setupScreen, progress: progressScreen,
-     ready: readyScreen, settings: settingsScreen, morning: morningScreen, report: reportScreen }[screen] || homeScreen)(v, false);
+  if (!S.baby) { chrome(false); return setupScreen(v); }
+  if (!S.program) { chrome(false); return programScreen(v, true); }
+  if (S.live && screen === 'session') { chrome(false); return sessionScreen(v); }
+  if (!S.live && screen === 'session') screen = 'home';
+  chrome(true);
+  ({ home: homeScreen, program: programScreen, setup: setupScreen, progress: progressScreen, ready: readyScreen,
+     settings: settingsScreen, morning: morningScreen, report: reportScreen, takeover: takeoverScreen,
+     export: exportScreen, tappedout: tappedOutScreen }[screen] || homeScreen)(v, false);
+}
+// The note button and, while a sleep is running, the small timer bar along the top.
+function chrome(show) {
+  $('#fab').hidden = !show;
+  const mini = !!(show && S.live);
+  $('#mini').hidden = !mini;
+  document.body.classList.toggle('has-mini', mini);
+  updateMini();
+}
+function updateMini() {
+  const el = $('#mini');
+  if (el.hidden || !S.live) return;
+  const L = S.live, now = Date.now(), nm = esc(name());
+  let txt;
+  if (L.phase === 'wait') txt = `⏳ Next check-in in <b>${mmss(L.ends - now)}</b>`;
+  else if (L.phase === 'alarm') txt = `🔔 <b>Time to check on ${nm}</b>`;
+  else if (L.phase === 'checkin') txt = `🚪 In the room · ${Math.floor((now - L.from) / 1000)}s`;
+  else if (L.phase === 'ready' || L.phase === 'final') txt = `▶ Ready for the next step`;
+  else { const w = liveWaking(); txt = `😴 ${nm} asleep · ${hm((now - (w.asleep || now)) / 60000)}`; }
+  el.classList.toggle('alert', L.phase === 'alarm');
+  el.innerHTML = `<span>${txt}</span><span class="mini-go">Timer ›</span>`;
 }
 
 function header(title, back = 'home') {
@@ -297,11 +407,13 @@ function setupScreen(v) {
     <div class="card">
       <label for="nm">Baby's name</label>
       <input id="nm" type="text" autocomplete="off" placeholder="e.g. Ella" value="${esc(b.name)}">
+      <h2 style="margin-top:18px">Night time</h2>
       <div class="row">
-        <div><label for="bed">Bedtime</label><input id="bed" type="time" value="${b.bed}"></div>
-        <div><label for="wk">Awake time</label><input id="wk" type="time" value="${b.wake}"></div>
+        <div><label for="bed">Night starts (bedtime)</label><input id="bed" type="time" value="${b.bed}"></div>
+        <div><label for="wk">Night ends (awake)</label><input id="wk" type="time" value="${b.wake}"></div>
       </div>
       <p class="small muted" id="hrs"></p>
+      <p class="small muted">Any sleep you start outside these times is recorded as a <b>day nap</b>, timed the same way.</p>
     </div>
     <button class="btn primary big" id="next">${first ? 'Next: choose a program' : 'Save'}</button>`;
   const hrs = () => {
@@ -355,49 +467,100 @@ function programScreen(v, first) {
   draw();
 }
 
-function homeScreen(v) {
-  const n = S.nights.length + 1;
+const linksHtml = () => {
   const done = READY.filter(r => S.ready[r[0]]).length;
-  const hours = nightHours();
+  return `<div class="links">
+    <button data-go="ready"><span>✅</span>Ready? ${done}/${READY.length}</button>
+    <button data-go="progress"><span>📈</span>Progress</button>
+    <button data-go="export"><span>📤</span>Export</button>
+    <button data-go="settings"><span>⚙️</span>Settings</button>
+  </div>`;
+};
+let homeKind = null;   // null: decide night or nap from the clock
+function homeScreen(v) {
+  const n = nightsSoFar() + 1, hours = nightHours();
+  const scene = `<img class="scene" src="scene.jpg" alt="A child plays a flute to a smiling moon and stars">`;
   if (S.finished) {
-    v.innerHTML = `
-      <img class="scene" src="scene.jpg" alt="A child plays a flute to a smiling moon and stars">
-      <div class="hero over"><h1>The plan is finished</h1>
-        <p class="muted">${S.nights.length} nights with ${esc(name())}. Well done, both of you.</p></div>
+    v.innerHTML = `${scene}<div class="hero over"><h1>The plan is finished</h1>
+        <p class="muted">${nightsSoFar()} nights with ${esc(name())}. Well done, both of you.</p></div>
       <button class="btn primary big" data-go="report">See the final report</button>
-      <button class="btn" id="again">Start a new plan</button>
-      <div class="links"><button data-go="progress"><span>📈</span>Progress</button>
-        <button data-go="ready"><span>✅</span>Checklist</button><button data-go="settings"><span>⚙️</span>Settings</button></div>`;
+      <button class="btn" id="again">Start a new plan</button>${linksHtml()}`;
     $('#again').onclick = newPlan;
     return bindGo(v);
   }
+  if (S.live) {
+    v.innerHTML = `${scene}<div class="hero over"><h1>${esc(sessionTitle(liveNight()))} is running</h1>
+        <p class="muted">The timer keeps going while you look around.</p></div>
+      <button class="btn primary big" id="back">Back to the timer</button>${linksHtml()}`;
+    $('#back').onclick = () => go('session');
+    return bindGo(v);
+  }
+  const kind = homeKind || (isNightTime() ? 'night' : 'nap'), night = kind === 'night';
   const planDone = n > planLen();
-  v.innerHTML = `
-    <img class="scene" src="scene.jpg" alt="A child plays a flute to a smiling moon and stars">
+  v.innerHTML = `${scene}
     <div class="hero over">
-      <h1>Tonight is night ${n}${planDone ? '' : ' of ' + planLen()}</h1>
-      <p class="muted">for ${esc(name())}</p>
+      <h1>${night ? `Tonight is night ${n}${planDone ? '' : ' of ' + planLen()}` : 'Day nap'}</h1>
+      <p class="muted">for ${esc(name())}${night ? '' : ` · night ${n} starts at ${S.baby.bed}`}</p>
       <div class="chips">
-        <span class="chip">Bed <b>${S.baby.bed}</b></span>
-        <span class="chip">Awake <b>${S.baby.wake}</b></span>
+        <span class="chip">Night <b>${S.baby.bed}–${S.baby.wake}</b></span>
         <span class="chip"><b>${programLabel(S.program)}</b></span>
       </div>
       ${hours < 11 ? `<p class="warn">Bed to awake is ${hours.toFixed(1)} hours. Aim for 11+.</p>` : ''}
     </div>
     <div class="tip"><b>Put ${esc(name())} down drowsy but awake</b>, a pat, dummy if used, and leave.
-      Press the button as you walk out. The first wait is ${minsFor(0)} minutes.</div>
+      Press the button as you walk out. The first wait is ${minsFor(0)} minutes.${night ? '' : ' Naps are timed and recorded the same way as nights.'}</div>
     ${planDone ? `<div class="tip"><b>You've reached the end of your ${planLen()}-night plan.</b> Have a look at the report,
       or keep tracking if you'd like.</div><button class="btn calm" data-go="report">See the report</button>` : ''}
-    <button class="btn primary big" id="start">Start bedtime</button>
-    <div class="links">
-      <button data-go="ready"><span>✅</span>Ready? ${done}/${READY.length}</button>
-      <button data-go="progress"><span>📈</span>Progress</button>
-      <button data-go="settings"><span>⚙️</span>Settings</button>
-    </div>
+    <button class="btn primary big" id="start">${night ? 'Start bedtime' : 'Start a nap'}</button>
+    <button class="btn ghost" id="switch">${night ? 'This is a day nap instead' : `It's bedtime: start night ${n}`}</button>
+    <button class="btn ghost" data-go="takeover">Already started, or taking over from your partner?</button>
+    ${linksHtml()}
     <p class="small muted center" style="margin-top:22px">Keep the volume up. You can lock the screen while you wait: the alert still plays.<br>
       Try <b>Settings › Test with the screen locked</b> once first.</p>`;
-  $('#start').onclick = startNight;
+  $('#start').onclick = () => { homeKind = null; startSession(kind); };
+  $('#switch').onclick = () => { homeKind = night ? 'nap' : 'night'; render(); };
   bindGo(v);
+}
+
+// For when the baby was put down earlier, e.g. by a partner on another phone.
+function takeoverScreen(v) {
+  let kind = isNightTime() ? 'night' : 'nap', checks = 0;
+  let pd = hhmmOf(Date.now() - 10 * 60000), ws = hhmmOf(Date.now());
+  const draw = () => {
+    v.innerHTML = `${header('Taking over')}
+      <p class="muted">Use this if ${esc(name())} went down earlier, for example with your partner. Enter what has happened so far and the timer carries on from there.</p>
+      <div class="card">
+        <label>This is</label>
+        <div class="seg">${[['night', 'Night'], ['nap', 'Day nap']].map(([k, t]) => `<button data-kind="${k}" class="${kind === k ? 'on' : ''}">${t}</button>`).join('')}</div>
+        <label for="pd">Put down (or started crying) at</label><input id="pd" type="time" value="${pd}">
+        <label>Check-ins already done</label>
+        <div class="seg">${Array.from({ length: mins().length + 1 }, (_, k) => `<button data-c="${k}" class="${checks === k ? 'on' : ''}">${k}</button>`).join('')}</div>
+        <label for="ws">The current wait started at</label><input id="ws" type="time" value="${ws}">
+        <p class="small" id="tomsg"></p>
+      </div>
+      <button class="btn primary big" id="carry">Carry on the timer</button>`;
+    const msg = () => {
+      pd = $('#pd').value || pd; ws = $('#ws').value || ws;
+      const from = timeToday(ws), put = timeToday(pd), len = minsFor(checks), end = from + len * 60000;
+      const el = $('#tomsg');
+      if (from < put) { el.innerHTML = '<span class="warn">The wait can\'t start before the put-down time.</span>'; return false; }
+      el.innerHTML = end > Date.now()
+        ? `This is ${checks >= mins().length ? 'an extra' : 'wait ' + (checks + 1)}: ${len} min, ending at <b>${clock(end)}</b> (${mmss(end - Date.now())} left).`
+        : `That ${len}-minute wait is already over, so the alert will sound straight away.`;
+      return true;
+    };
+    v.querySelectorAll('[data-kind]').forEach(b => b.onclick = () => { kind = b.dataset.kind; draw(); });
+    v.querySelectorAll('[data-c]').forEach(b => b.onclick = () => { checks = +b.dataset.c; draw(); });
+    $('#pd').oninput = $('#ws').oninput = msg; msg();
+    $('#carry').onclick = () => {
+      if (!msg()) return;
+      homeKind = null;
+      startSession(kind, { takeover: true, putDown: timeToday(pd), checks, waitFrom: timeToday(ws),
+        note: `Taken over (times entered by hand): put down ${pd}, ${checks} check-in${checks === 1 ? '' : 's'} already done, current wait started ${ws}.` });
+    };
+    bindGo(v);
+  };
+  draw();
 }
 
 let rotateTimer = null, lastPsst = 0;
@@ -426,14 +589,18 @@ const ring = cls => `<div class="ring ${cls}"><svg viewBox="0 0 100 100"><circle
   <div class="ring-text"><div class="clock" id="clk">--:--</div><div class="clock-sub" id="clksub"></div></div></div>`;
 
 function sessionScreen(v) {
-  const L = S.live, n = L.night + 1, w = liveWaking(), last = mins().length - 1;
-  const wakeNo = liveNight().wakings.length;
-  const head = `<div class="top"><h1 class="small muted" style="font-size:0.95rem;font-weight:500">Night ${n} · ${wakeNo > 1 ? 'Waking ' + (wakeNo - 1) : 'Bedtime'}</h1>
-    <button class="icon-btn" id="menu" aria-label="Finish night">✕</button></div>`;
-  const supportive = n <= 2;
-  const checkTip = supportive
+  const L = S.live, night = liveNight(), nap = isNap(night), w = liveWaking(), last = mins().length - 1;
+  const wakeNo = night.wakings.length;
+  const nn = nap ? nightsSoFar() + 1 : nightNo(night);
+  const head = `<div class="top session-top">
+    <button class="icon-btn txt" id="minbtn" aria-label="Minimise the timer">⌄ Minimise</button>
+    <h1 class="small muted">${esc(sessionTitle(night))} · ${wakeNo > 1 ? 'Waking ' + (wakeNo - 1) : nap ? 'Going down' : 'Bedtime'}</h1>
+    <button class="icon-btn" id="note" aria-label="Add a note">📝</button>
+    <button class="icon-btn" id="menu" aria-label="Finish">✕</button></div>`;
+  const checkTip = nn <= 2
     ? `<b>Nights 1–2: extra reassurance.</b> Lay them back down, dummy in, a quick pat or back rub, and soft words: “I'm right here, you're okay.” Then out and close the door.`
     : `<b>From night 3: quieter.</b> Reposition, dummy in, a quick pat. No chatting. In and out.`;
+  const tap = `<button class="btn tapout" id="tap">Tap out</button>`;
   let body = '';
 
   if (L.phase === 'wait') {
@@ -444,7 +611,7 @@ function sessionScreen(v) {
       <div class="encourage" id="enc"></div></div>
       <div class="actions">
         ${finalWait ? `<p class="small muted center">This is the last wait. After this check-in you can pick ${esc(name())} up if they're still crying.</p>` : ''}
-        <button class="btn good" id="asleep">${esc(name())} is asleep 💤</button>
+        <button class="btn good" id="asleep">${esc(name())} is asleep 💤</button>${tap}
       </div>`;
   } else if (L.phase === 'alarm') {
     body = `<div class="stage alarm">
@@ -454,14 +621,14 @@ function sessionScreen(v) {
       <p class="small muted" id="late"></p></div>
       <div class="actions">
         <button class="btn calm big" id="goin">Going in</button>
-        <button class="btn good" id="asleep">Actually, ${esc(name())} fell asleep</button>
+        <button class="btn good" id="asleep">Actually, ${esc(name())} fell asleep</button>${tap}
       </div>`;
   } else if (L.phase === 'checkin') {
     body = `<div class="stage">
       <div class="step-label">Check-in ${w.checks.length + 1} · aim for ${S.checkinSecs} sec</div>
       ${ring('checkin')}
       <div class="tip">${checkTip}</div></div>
-      <div class="actions"><button class="btn primary big" id="out">I'm out of the room</button></div>`;
+      <div class="actions"><button class="btn primary big" id="out">I'm out of the room</button>${tap}</div>`;
   } else if (L.phase === 'ready') {
     body = `<div class="stage">
       <div class="moon">🚪</div>
@@ -470,7 +637,7 @@ function sessionScreen(v) {
       ${dotsHtml()}</div>
       <div class="actions">
         <button class="btn primary big" id="next">Start ${minsFor(L.step)} min</button>
-        <button class="btn good" id="asleep">${esc(name())} is asleep 💤</button>
+        <button class="btn good" id="asleep">${esc(name())} is asleep 💤</button>${tap}
       </div>`;
   } else if (L.phase === 'final') {
     body = `<div class="stage">
@@ -481,23 +648,23 @@ function sessionScreen(v) {
       <div class="actions">
         <button class="btn calm big" id="pick">I'm picking ${esc(name())} up</button>
         <button class="btn" id="again">One more ${minsFor(last)} min wait</button>
-        <button class="btn good" id="asleep">${esc(name())} is asleep 💤</button>
+        <button class="btn good" id="asleep">${esc(name())} is asleep 💤</button>${tap}
       </div>`;
   } else if (L.phase === 'asleep' || L.phase === 'picked') {
     const cm = Math.round(cryMs(w) / 60000);
-    const morning = isMorning();
+    const morning = !nap && isMorning();
     body = `<div class="stage">
       <img class="moon-img" src="icon-192.png" alt="">
-      <h1>${L.phase === 'asleep' ? esc(name()) + ' is asleep.' : 'You did your best tonight.'}</h1>
+      <h1>${L.phase === 'asleep' ? esc(name()) + ' is asleep.' : 'You did your best.'}</h1>
       <p class="muted">${L.phase === 'asleep'
         ? `Crying took about ${cm} min with ${w.checks.length} check-in${w.checks.length === 1 ? '' : 's'}. Go and rest.`
-        : `Settle ${esc(name())}, then lay them back down drowsy but awake. Tomorrow is a new night.`}</p>
+        : `Settle ${esc(name())}, then lay them back down drowsy but awake.`}</p>
       <div class="since"><div class="clock" id="since">0m</div><div class="clock-sub" id="sincesub">asleep since ${clock(w.asleep)}</div></div>
-      ${liveNight().wakings.length > 1 ? `<p class="small muted">Wakings tonight: ${liveNight().wakings.length - 1}</p>` : ''}
+      ${wakeNo > 1 ? `<p class="small muted">Wakings ${nap ? 'this nap' : 'tonight'}: ${wakeNo - 1}</p>` : ''}
       ${morning ? `<p class="warn">It's past ${S.baby.wake}. Good morning! Finish the night below.</p>` : ''}</div>
       <div class="actions">
-        <button class="btn calm big" id="woke">${esc(name())} woke up</button>
-        <button class="btn ${morning ? 'primary' : ''}" id="finish">It's morning, finish the night</button>
+        <button class="btn calm big" id="woke">${esc(name())} woke up${nap ? ' (try to resettle)' : ''}</button>
+        <button class="btn ${morning || nap ? 'primary' : ''}" id="finish">${nap ? 'The nap is over' : "It's morning, finish the night"}</button>
       </div>`;
   }
   v.innerHTML = `<div class="backdrop"></div><div class="session">${head}${body}</div>`;
@@ -511,7 +678,10 @@ function sessionScreen(v) {
   on('pick', () => fellAsleep(true));
   on('woke', beginWaking);
   on('finish', finishNight);
-  on('menu', () => { if (confirm('Finish tonight now? The night so far is kept in Progress.')) finishNight(); });
+  on('tap', tapOut);
+  on('note', () => openNote());
+  on('minbtn', () => go('home'));
+  on('menu', () => { if (confirm(`Finish ${nap ? 'this nap' : 'tonight'} now? It is kept in Progress.`)) finishNight(); });
   if (L.phase === 'wait') startRotation();
   tick();
 }
@@ -526,6 +696,7 @@ function isMorning() {
 function tick() {
   const L = S.live; if (!L) return;
   const now = Date.now();
+  updateMini();
   if (L.phase === 'wait') {
     if (now >= L.ends) return fireAlarm();
     const total = L.ends - L.from, left = L.ends - now;
@@ -555,38 +726,68 @@ document.addEventListener('visibilitychange', () => {
 // Audio can only start after a tap, so wake it on every tap.
 document.addEventListener('pointerdown', unlockAudio, { passive: true });
 
-function morningScreen(v, _f) {
+function notesHtml(list) {
+  return (list || []).map(nt => `<div class="note-row"><span>${clock(nt.t)}</span><span>📝 ${esc(nt.text)}</span></div>`).join('');
+}
+
+function morningScreen(v) {
   const n = S.nights[screenArg];
   if (!n) return go('home');
-  const s = stats(n), ns = doneNights();
+  const s = stats(n), nap = isNap(n), ns = doneNights();
   v.innerHTML = `
-    <div class="hero"><div class="moon">☀️</div><h1>Good morning!</h1>
-      <p class="muted">Night ${screenArg + 1} of ${planLen()} is done. ${s.through ? `⭐ ${esc(name())} slept through!` : 'Be proud of yourselves.'}</p></div>
+    <div class="hero"><div class="moon">${nap ? '🌤️' : '☀️'}</div><h1>${nap ? 'Nap done' : 'Good morning!'}</h1>
+      <p class="muted">${nap ? `${esc(name())} slept ${hm(s.longest * 60)}.` : `Night ${nightNo(n)} of ${planLen()} is done. ${s.through ? `⭐ ${esc(name())} slept through!` : 'Be proud of yourselves.'}`}</p></div>
     <div class="card">
       <div class="chips">
         <span class="chip">Settled in <b>${hm(s.settle)}</b></span>
-        <span class="chip">Wakings <b>${s.wakings}</b></span>
+        ${nap ? '' : `<span class="chip">Wakings <b>${s.wakings}</b></span>`}
         <span class="chip">Awake <b>${hm(s.awake)}</b></span>
-        <span class="chip">Longest sleep <b>${hm(s.longest * 60)}</b></span>
+        <span class="chip">${nap ? 'Nap length' : 'Longest sleep'} <b>${hm(s.longest * 60)}</b></span>
       </div>
-      ${ns.length >= 2 ? `${trendChart(METRICS[0], ns)}<p class="small">${trendWords(METRICS[0], ns)}</p>` : ''}
+      ${!nap && ns.length >= 2 ? `${trendChart(METRICS[0], ns)}<p class="small">${trendWords(METRICS[0], ns)}</p>` : ''}
     </div>
-    <div class="tip"><b>Make the morning bright.</b> If ${esc(name())} is crying, wait for a calmer moment before you go in,
-      so crying doesn't become the way out of the cot. Then open the curtains, sing, get some fresh air. Morning is fun; night is for sleep.</div>
+    ${(n.notes || []).length ? `<div class="card"><h2>Notes</h2>${notesHtml(n.notes)}</div>` : ''}
+    <div class="tip">${nap ? `<b>Naps help nights.</b> Keep the same short routine for every sleep, day and night.`
+      : `<b>Make the morning bright.</b> If ${esc(name())} is crying, wait for a calmer moment before you go in,
+      so crying doesn't become the way out of the cot. Then open the curtains, sing, get some fresh air. Morning is fun; night is for sleep.`}</div>
     <button class="btn primary big" data-go="home">Done</button>
+    <button class="btn" id="mnote">Add a note about ${nap ? 'this nap' : 'last night'}</button>
     <button class="btn ghost" data-go="progress">See progress</button>`;
+  $('#mnote').onclick = () => openNote(n);
   bindGo(v);
 }
 
-/* ---------- tracking: per-night numbers, trend lines, the awake-window map and the report ---------- */
+function tappedOutScreen(v) {
+  const n = S.nights[screenArg];
+  if (!n) return go('home');
+  const nap = isNap(n);
+  v.innerHTML = `
+    <div class="hero"><img class="moon-img" src="icon-192.png" alt=""><h1>Tomorrow is another day.</h1>
+      <p class="muted">You showed up for ${esc(name())}${nap ? '' : ' tonight'}, and that is what matters most.
+      Bring them in close and get some rest. You both deserve it.</p></div>
+    <div class="tip">One hard ${nap ? 'nap' : 'night'} doesn't undo the progress. ${nap ? 'Try again at the next sleep' : `Pick it up again tomorrow at ${S.baby.bed}`}, same routine, same plan.
+      It's marked in red in Progress so you can see the whole picture.</div>
+    <button class="btn" id="tnote">Add a note about what happened</button>
+    <button class="btn primary big" data-go="home">Done</button>`;
+  $('#tnote').onclick = () => openNote(n);
+  bindGo(v);
+}
+
+/* ---------- tracking: per-sleep numbers, trend lines, the awake-window map and the report ---------- */
 const METRICS = [
   { k: 'awake', label: 'Awake time', short: 'Awake', unit: 'min', better: 'down', fmt: v => Math.round(v) + ' min' },
   { k: 'wakings', label: 'Night wakings', short: 'Wakings', unit: '', better: 'down', fmt: v => (Math.round(v * 10) / 10) + '' },
   { k: 'settle', label: 'Settling at bedtime', short: 'Settling', unit: 'min', better: 'down', fmt: v => Math.round(v) + ' min' },
   { k: 'longest', label: 'Longest sleep', short: 'Longest', unit: 'h', better: 'up', fmt: v => hm(v * 60) }
 ];
+const NAP_METRICS = [
+  { k: 'settle', label: 'Time to fall asleep', short: 'Settling', unit: 'min', better: 'down', fmt: v => Math.round(v) + ' min' },
+  { k: 'longest', label: 'Nap length', short: 'Length', unit: 'h', better: 'up', fmt: v => hm(v * 60) },
+  { k: 'awake', label: 'Awake time', short: 'Awake', unit: 'min', better: 'down', fmt: v => Math.round(v) + ' min' }
+];
 const hm = m => { m = Math.round(m); return m < 60 ? m + ' min' : Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm'; };
-const doneNights = () => S.nights.filter(n => n.ended);
+const doneNights = () => S.nights.filter(n => n.ended && !isNap(n));
+const doneNaps = () => S.nights.filter(n => n.ended && isNap(n));
 const planLen = () => S.planNights || 21;
 
 function stats(n) {
@@ -599,19 +800,19 @@ function stats(n) {
     longest = Math.max(longest, to - w.asleep);
   });
   const wakings = Math.max(0, ws.length - 1);
-  const pickedUp = ws.some(w => w.pickedUp);
+  const pickedUp = ws.some(w => w.pickedUp), tappedOut = !!n.tappedOut;
   return {
     awake: ws.reduce((a, w) => a + ((w.asleep || end) - w.start), 0) / 60000,
     wakings,
     settle: bed ? ((bed.asleep || end) - bed.start) / 60000 : 0,
     longest: longest / 3600000,
     checks: nightChecks(n),
-    through: wakings === 0 && !pickedUp,
-    pickedUp
+    through: wakings === 0 && !pickedUp && !tappedOut,
+    pickedUp, tappedOut
   };
 }
 
-// Straight line of best fit through the nightly values.
+// Straight line of best fit through the values.
 function fitLine(pts) {
   if (pts.length < 2) return null;
   const n = pts.length, mx = pts.reduce((a, p) => a + p.x, 0) / n, my = pts.reduce((a, p) => a + p.y, 0) / n;
@@ -627,10 +828,13 @@ function niceMax(v, unit) {
   return Math.ceil(v / 30) * 30;
 }
 
-function trendChart(metric, ns) {
-  const pts = ns.map((n, i) => ({ x: i + 1, y: stats(n)[metric.k] }));
-  const slots = Math.max(planLen(), pts.length);
-  const W = 340, H = 180, L = 34, R = 8, T = 12, B = 26, pw = W - L - R, ph = H - T - B;
+// Bars per sleep with the trend line. Tapped-out sleeps are red with a marker on top.
+function trendChart(metric, ns, opt = {}) {
+  const noun = opt.noun || 'Night';
+  const sts = ns.map(stats);
+  const pts = sts.map((s, i) => ({ x: i + 1, y: s[metric.k] }));
+  const slots = opt.slots || Math.max(planLen(), pts.length);
+  const W = 340, H = 186, L = 34, R = 8, T = 18, B = 26, pw = W - L - R, ph = H - T - B;
   const max = niceMax(Math.max(0, ...pts.map(p => p.y)), metric.unit);
   const x = i => L + (i - 0.5) / slots * pw, y = v => T + ph - Math.min(v, max) / max * ph;
   const bw = Math.max(3, Math.min(14, pw / slots * 0.62));
@@ -641,102 +845,145 @@ function trendChart(metric, ns) {
       <text class="ch-txt" x="${L - 6}" y="${y(v) + 3.5}" text-anchor="end">${lab(Math.round(v * 10) / 10)}</text>`;
   }
   for (let i = 1; i <= slots; i++) {
-    const p = pts[i - 1];
-    if (p) g += `<rect class="ch-bar" x="${x(i) - bw / 2}" y="${y(p.y)}" width="${bw}" height="${Math.max(1.5, T + ph - y(p.y))}" rx="2"><title>Night ${i}: ${metric.fmt(p.y)}</title></rect>`;
-    else g += `<circle class="ch-todo" cx="${x(i)}" cy="${T + ph - 2}" r="1.6"/>`;
+    const p = pts[i - 1], tapped = p && sts[i - 1].tappedOut;
+    if (p) {
+      const top = y(p.y);
+      g += `<rect class="${tapped ? 'ch-tap' : 'ch-bar'}" x="${x(i) - bw / 2}" y="${top}" width="${bw}" height="${Math.max(1.5, T + ph - top)}" rx="2"><title>${noun} ${i}: ${metric.fmt(p.y)}${tapped ? ' (tapped out)' : ''}</title></rect>`;
+      if (tapped) g += `<path class="ch-tap" d="M${x(i) - 4} ${top - 10}h8l-4 6z"/>`;
+    } else g += `<circle class="ch-todo" cx="${x(i)}" cy="${T + ph - 2}" r="1.6"/>`;
     if (i === 1 || i % 7 === 0 || i === slots) g += `<text class="ch-txt" x="${x(i)}" y="${H - 8}" text-anchor="middle">${i}</text>`;
   }
   const f = fitLine(pts);
-  if (f) {
-    const x1 = 1, x2 = pts.length;
-    g += `<line class="ch-trend" x1="${x(x1)}" y1="${y(Math.max(0, f.at(x1)))}" x2="${x(x2)}" y2="${y(Math.max(0, f.at(x2)))}"/>`;
-  }
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${metric.label} per night with trend line">${g}</svg>`;
+  if (f) g += `<line class="ch-trend" x1="${x(1)}" y1="${y(Math.max(0, f.at(1)))}" x2="${x(pts.length)}" y2="${y(Math.max(0, f.at(pts.length)))}"/>`;
+  const anyTap = sts.some(s => s.tappedOut);
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${metric.label} per ${noun.toLowerCase()} with trend line">${g}</svg>
+    ${anyTap ? `<div class="legend"><span><i class="sw ch-tap"></i>Tapped out</span></div>` : ''}`;
 }
 
-function trendWords(metric, ns) {
+function trendWords(metric, ns, per = 'night') {
   const f = fitLine(ns.map((n, i) => ({ x: i + 1, y: stats(n)[metric.k] })));
-  if (!f) return 'The trend line appears after 2 nights.';
-  const per = metric.k === 'longest' ? f.slope * 60 : f.slope;   // longest: minutes per night
-  const size = Math.abs(per);
+  if (!f) return `The trend line appears after 2 ${per}s.`;
+  const rate = metric.k === 'longest' ? f.slope * 60 : f.slope;   // longest: minutes per sleep
+  const size = Math.abs(rate);
   const unit = metric.k === 'wakings' ? 'wakings' : 'min';
   if (size < (metric.k === 'wakings' ? 0.05 : 0.5)) return 'Holding steady.';
-  const good = (per < 0) === (metric.better === 'down');
+  const good = (rate < 0) === (metric.better === 'down');
   const amt = metric.k === 'wakings' ? (Math.round(size * 10) / 10) + ' ' + unit : Math.round(size) + ' ' + unit;
-  return `${good ? '👍 ' : ''}${per < 0 ? 'Going down' : 'Going up'} by about ${amt} a night${good ? '' : ' (not the way we want yet)'}.`;
+  return `${good ? '👍 ' : ''}${rate < 0 ? 'Going down' : 'Going up'} by about ${amt} a ${per}${good ? '' : ' (not the way we want yet)'}.`;
 }
 
-// One row per night, from just before bedtime to after awake time. Gold = awake, blue = asleep.
-function sleepMap(ns, first) {
-  if (!ns.length) return '';
-  const bedMin = toMin(S.baby.bed), spanMin = nightHours() * 60 + 90;
-  const W = 340, L = 26, R = 6, T = 18, rowH = 10, gap = 4, pw = W - L - R;
-  const H = T + ns.length * (rowH + gap) + 4;
+// Rows for the map: one per night, or one per day holding all of that day's naps.
+function mapRows(list, kind) {
+  if (kind === 'night') return list.map(n => {
+    const d = new Date(n.started); d.setHours(0, 0, 0, 0);
+    let b = d.getTime() + (toMin(S.baby.bed) - 30) * 60000;
+    if (n.started - b < -12 * 3600000) b -= 86400000;   // started after midnight: belongs to the night before
+    return { label: String(nightNo(n)), items: [n], base: b };
+  });
+  const byDay = {};
+  list.forEach(n => { const d = new Date(n.started); d.setHours(0, 0, 0, 0); (byDay[d.getTime()] = byDay[d.getTime()] || []).push(n); });
+  return Object.keys(byDay).sort().map(k => ({
+    label: new Date(+k).toLocaleDateString([], { day: 'numeric', month: 'short' }), items: byDay[k],
+    base: +k + (toMin(S.baby.wake) - 30) * 60000
+  }));
+}
+// Gold = awake/crying, blue = asleep, orange = picked up, red = tapped out.
+function sleepMap(list, kind = 'night') {
+  if (!list.length) return '';
+  const night = kind === 'night', dayMin = 1440 - nightHours() * 60;
+  const spanMin = (night ? nightHours() * 60 : dayMin) + 90;
+  const rows = mapRows(list, kind);
+  const W = 340, L = night ? 26 : 46, R = 6, T = 18, rowH = 10, gap = 4, pw = W - L - R;
+  const H = T + rows.length * (rowH + gap) + 4;
   const X = (t, b) => L + Math.max(0, Math.min(1, (t - b) / (spanMin * 60000))) * pw;
   let g = '';
-  const tick = (min, text) => {
+  const mark = (min, text) => {
     const px = L + min / spanMin * pw;
     g += `<line class="ch-grid" x1="${px}" x2="${px}" y1="${T - 4}" y2="${H}"/><text class="ch-txt" x="${px}" y="${T - 7}" text-anchor="middle">${text}</text>`;
   };
-  tick(30, S.baby.bed);
-  const toMidnight = 1440 - (bedMin - 30);
-  if (toMidnight > 60 && toMidnight < spanMin - 60) tick(toMidnight, '00:00');
-  tick(30 + nightHours() * 60, S.baby.wake);
-  ns.forEach((n, r) => {
-    const d = new Date(n.started); d.setHours(0, 0, 0, 0);
-    let b = d.getTime() + (bedMin - 30) * 60000;
-    if (n.started - b < -12 * 3600000) b -= 86400000;   // started after midnight: belongs to the night before
-    const yy = T + r * (rowH + gap), end = n.ended || Date.now();
-    g += `<text class="ch-txt" x="${L - 5}" y="${yy + rowH - 1.5}" text-anchor="end">${first + r}</text>`;
+  const start = (night ? toMin(S.baby.bed) : toMin(S.baby.wake)) - 30;
+  mark(30, night ? S.baby.bed : S.baby.wake);
+  const mid = ((night ? 1440 : 720) - start + 1440) % 1440;
+  if (mid > 60 && mid < spanMin - 60) mark(mid, night ? '00:00' : '12:00');
+  mark(30 + (night ? nightHours() * 60 : dayMin), night ? S.baby.wake : S.baby.bed);
+  rows.forEach((row, r) => {
+    const yy = T + r * (rowH + gap), b = row.base;
+    g += `<text class="ch-txt" x="${L - 5}" y="${yy + rowH - 1.5}" text-anchor="end">${row.label}</text>`;
     g += `<rect class="ch-row" x="${L}" y="${yy}" width="${pw}" height="${rowH}" rx="3"/>`;
-    n.wakings.forEach((w, i) => {
-      if (w.asleep) {
-        const to = n.wakings[i + 1] ? n.wakings[i + 1].start : end;
-        g += `<rect class="ch-sleep" x="${X(w.asleep, b)}" y="${yy}" width="${Math.max(0, X(to, b) - X(w.asleep, b))}" height="${rowH}" rx="2"/>`;
-      }
-      const a = X(w.start, b), z = X(w.asleep || end, b);
-      g += `<rect class="${w.pickedUp ? 'ch-picked' : 'ch-awake'}" x="${a}" y="${yy}" width="${Math.max(2, z - a)}" height="${rowH}" rx="2"><title>Awake ${clock(w.start)} for ${hm(((w.asleep || end) - w.start) / 60000)}</title></rect>`;
+    row.items.forEach(n => {
+      const end = n.ended || Date.now();
+      n.wakings.forEach((w, i) => {
+        if (w.asleep) {
+          const to = n.wakings[i + 1] ? n.wakings[i + 1].start : end;
+          g += `<rect class="ch-sleep" x="${X(w.asleep, b)}" y="${yy}" width="${Math.max(0, X(to, b) - X(w.asleep, b))}" height="${rowH}" rx="2"/>`;
+        }
+        const a = X(w.start, b), z = X(w.asleep || end, b);
+        const cls = w.tappedOut ? 'ch-tap' : w.pickedUp ? 'ch-picked' : 'ch-awake';
+        g += `<rect class="${cls}" x="${a}" y="${yy}" width="${Math.max(2, z - a)}" height="${rowH}" rx="2"><title>Awake ${clock(w.start)} for ${hm(((w.asleep || end) - w.start) / 60000)}</title></rect>`;
+      });
+      if (n.tappedOut) g += `<rect class="ch-tap" x="${X(n.tappedOut, b) - 1}" y="${yy - 3}" width="3" height="${rowH + 6}" rx="1"><title>Tapped out ${clock(n.tappedOut)}</title></rect>`;
     });
   });
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Awake and asleep times for each night">${g}</svg>
-    <div class="legend"><span><i class="sw ch-sleep"></i>Asleep</span><span><i class="sw ch-awake"></i>Awake / crying</span><span><i class="sw ch-picked"></i>Picked up</span></div>`;
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Awake and asleep times for each ${night ? 'night' : 'day'}">${g}</svg>
+    <div class="legend"><span><i class="sw ch-sleep"></i>Asleep</span><span><i class="sw ch-awake"></i>Awake / crying</span>
+      <span><i class="sw ch-picked"></i>Picked up</span><span><i class="sw ch-tap"></i>Tapped out</span></div>`;
 }
 
-let progMetric = 'awake', showAll = false;
+function sessionCard(n, label) {
+  const s = stats(n), nap = isNap(n);
+  return `<div class="night">
+    <h3>${label} · ${day(n.started)}${s.through && !nap ? ' · ⭐ slept through' : ''}${s.tappedOut ? ` · <span class="tapflag">Tapped out ${clock(n.tappedOut)}</span>` : ''}</h3>
+    <div class="small muted">Down ${clock(n.started)} · settled in ${hm(s.settle)}${nap ? '' : ` · ${s.wakings} waking${s.wakings === 1 ? '' : 's'}`} · awake ${hm(s.awake)} · ${nap ? 'nap' : 'longest sleep'} ${hm(s.longest * 60)}</div>
+    ${n.wakings.map((w, j) => `<div class="waking"><span style="min-width:74px">${j ? 'Waking ' + j : nap ? 'Down' : 'Bedtime'} ${clock(w.start)}</span>
+      <span class="dots">${w.checks.map(() => '<span class="dot done"></span>').join('') || '<span class="small">no check-ins</span>'}</span>
+      <span>${Math.round(((w.asleep || n.ended || Date.now()) - w.start) / 60000)} min${w.pickedUp ? ' · picked up' : ''}${w.tappedOut ? ' · tapped out' : ''}</span></div>`).join('')}
+    ${notesHtml(n.notes)}
+  </div>`;
+}
+
+let progMetric = 'awake', showAll = false, progKind = 'night';
 function progressScreen(v) {
-  const ns = doneNights();
-  const live = S.nights.filter(n => !n.ended).length;
-  const m = METRICS.find(x => x.k === progMetric);
+  const nap = progKind === 'nap';
+  const ns = nap ? doneNaps() : doneNights();
+  const metrics = nap ? NAP_METRICS : METRICS;
+  if (!metrics.find(x => x.k === progMetric)) progMetric = metrics[0].k;
+  const m = metrics.find(x => x.k === progMetric);
   const last = ns[ns.length - 1], ls = last && stats(last);
-  const through = ns.filter(n => stats(n).through).length;
+  const through = ns.filter(n => stats(n).through).length, taps = ns.filter(n => n.tappedOut).length;
+  const live = S.nights.filter(n => !n.ended).length;
+  const list = ns.map((n, i) => ({ n, label: nap ? 'Nap ' + (i + 1) : 'Night ' + nightNo(n) })).reverse();
   v.innerHTML = `${header('Progress')}
+    <div class="seg">
+      <button data-pk="night" class="${nap ? '' : 'on'}">Nights (${doneNights().length})</button>
+      <button data-pk="nap" class="${nap ? 'on' : ''}">Day naps (${doneNaps().length})</button>
+    </div>
     ${ns.length ? `
     <div class="chips">
-      <span class="chip">Night <b>${ns.length}</b> of ${planLen()}</span>
-      <span class="chip">Slept through <b>${through}</b></span>
+      ${nap ? `<span class="chip">Naps <b>${ns.length}</b></span>` : `<span class="chip">Night <b>${ns.length}</b> of ${planLen()}</span>
+      <span class="chip">Slept through <b>${through}</b></span>`}
+      ${taps ? `<span class="chip">Tapped out <b class="tapflag">${taps}</b></span>` : ''}
     </div>
     <div class="card">
-      <div class="seg">${METRICS.map(x => `<button data-m="${x.k}" class="${x.k === progMetric ? 'on' : ''}">${x.short}</button>`).join('')}</div>
-      <h2>${m.label} each night</h2>
-      ${trendChart(m, ns)}
-      <p class="small"><span class="key-trend"></span> ${trendWords(m, ns)}</p>
-      ${ls ? `<p class="small muted">Last night: ${m.fmt(ls[m.k])}</p>` : ''}
+      <div class="seg">${metrics.map(x => `<button data-m="${x.k}" class="${x.k === progMetric ? 'on' : ''}">${x.short}</button>`).join('')}</div>
+      <h2>${m.label} each ${nap ? 'nap' : 'night'}</h2>
+      ${trendChart(m, ns, nap ? { slots: Math.max(7, ns.length), noun: 'Nap' } : {})}
+      <p class="small"><span class="key-trend"></span> ${trendWords(m, ns, nap ? 'nap' : 'night')}</p>
+      ${ls ? `<p class="small muted">Last ${nap ? 'nap' : 'night'}: ${m.fmt(ls[m.k])}</p>` : ''}
     </div>
     <div class="card">
       <h2>Awake windows</h2>
-      <p class="small muted">Each row is a night. Watch the gold shrink as ${esc(name())} learns.</p>
-      ${sleepMap(ns.slice(-planLen()), Math.max(1, ns.length - planLen() + 1))}
+      <p class="small muted">${nap ? 'Each row is a day, with all its naps.' : `Each row is a night. Watch the gold shrink as ${esc(name())} learns.`}</p>
+      ${sleepMap(nap ? ns.slice(-60) : ns.slice(-planLen()), nap ? 'nap' : 'night')}
     </div>
-    <button class="btn primary" id="rep">Get my report</button>
-    <h2>Night by night</h2><div class="card">${ns.map((n, i) => ({ n, i })).reverse().slice(0, showAll ? undefined : 5).map(({ n, i }) => { const s = stats(n); return `<div class="night">
-        <h3>Night ${i + 1} · ${day(n.started)}${s.through ? ' · ⭐ slept through' : ''}</h3>
-        <div class="small muted">Down ${clock(n.started)} · settled in ${hm(s.settle)} · ${s.wakings} waking${s.wakings === 1 ? '' : 's'} · awake ${hm(s.awake)} · longest sleep ${hm(s.longest * 60)}</div>
-        ${n.wakings.map((w, j) => `<div class="waking"><span style="min-width:74px">${j ? 'Waking ' + j : 'Bedtime'} ${clock(w.start)}</span>
-          <span class="dots">${w.checks.map(() => '<span class="dot done"></span>').join('') || '<span class="small">no check-ins</span>'}</span>
-          <span>${Math.round(cryMs(w) / 60000)} min${w.pickedUp ? ' · picked up' : ''}</span></div>`).join('')}
-      </div>`; }).join('')}</div>${ns.length > 5 ? `<button class="btn ghost" id="all">${showAll ? 'Show fewer' : 'Show all ' + ns.length + ' nights'}</button>` : ''}`
-    : `<div class="card center"><p>No finished nights yet${live ? ' (tonight is still going)' : ''}.</p>
-        <p class="muted small">After each night you'll see a trend line for awake time, wakings, settling and the longest sleep, plus a map of the awake windows.</p></div>`}`;
+    ${nap ? '' : '<button class="btn primary" id="rep">Get my report</button>'}
+    <button class="btn" data-go="export">Export everything (for a doctor or AI)</button>
+    <h2>${nap ? 'Nap by nap' : 'Night by night'}</h2>
+    <div class="card">${list.slice(0, showAll ? undefined : 5).map(({ n, label }) => sessionCard(n, label)).join('')}</div>
+    ${list.length > 5 ? `<button class="btn ghost" id="all">${showAll ? 'Show fewer' : `Show all ${list.length}`}</button>` : ''}`
+    : `<div class="card center"><p>No finished ${nap ? 'naps' : 'nights'} yet${live ? ' (one is still going)' : ''}.</p>
+        <p class="muted small">After each ${nap ? 'nap' : 'night'} you'll see a trend line, a map of the awake windows, and every note you made.</p></div>`}
+    ${S.notes.length ? `<h2>Other notes</h2><div class="card">${S.notes.slice().reverse().map(nt => `<div class="note-row"><span>${day(nt.t)} ${clock(nt.t)}</span><span>📝 ${esc(nt.text)}</span></div>`).join('')}</div>` : ''}`;
+  v.querySelectorAll('[data-pk]').forEach(b => b.onclick = () => { progKind = b.dataset.pk; showAll = false; render(); });
   v.querySelectorAll('[data-m]').forEach(b => b.onclick = () => { progMetric = b.dataset.m; render(); });
   const all = $('#all'); if (all) all.onclick = () => { showAll = !showAll; render(); };
   const rep = $('#rep'); if (rep) rep.onclick = () => go('report');
@@ -757,12 +1004,13 @@ function reportData() {
   let streak = 0; for (let i = st.length - 1; i >= 0 && st[i].through; i--) streak++;
   const c = ns.length >= 2 ? compare(ns) : null;
   const awake = c && c.rows[0];
+  const taps = ns.map((n, i) => n.tappedOut ? i + 1 : 0).filter(Boolean);
   let verdict;
   if (!c) verdict = 'Finish at least 2 nights to see a comparison.';
   else if (awake.to <= awake.from * 0.5 || streak >= 3) verdict = `Wonderful progress. ${name()} has learned to settle. Keep the same bedtime and routine.`;
   else if (awake.to < awake.from) verdict = `Getting there. Awake time is coming down. Stay consistent; it usually keeps improving.`;
   else verdict = `Not improving yet. Be honest about whether every night followed the plan, since giving in restarts the lesson. If you have been consistent, check with your doctor that nothing else is going on.`;
-  return { ns, st, throughIdx, streak, c, verdict };
+  return { ns, st, throughIdx, streak, c, verdict, taps, naps: doneNaps().length };
 }
 function reportText(r) {
   const lines = [`Sleep Coach report for ${name()}`,
@@ -772,6 +1020,8 @@ function reportText(r) {
     r.c.rows.forEach(({ m, from, to }) => lines.push(`- ${m.label}: ${m.fmt(from)} to ${m.fmt(to)}`));
   }
   lines.push(`Slept through: ${r.st.filter(s => s.through).length} of ${r.ns.length} nights${r.throughIdx >= 0 ? ' (first on night ' + (r.throughIdx + 1) + ')' : ''}`);
+  if (r.taps.length) lines.push(`Tapped out: ${r.taps.length} night${r.taps.length === 1 ? '' : 's'} (night ${r.taps.join(', ')})`);
+  if (r.naps) lines.push(`Day naps recorded: ${r.naps}`);
   lines.push(r.verdict);
   return lines.join('\n');
 }
@@ -797,11 +1047,14 @@ function reportScreen(v) {
         ${r.throughIdx >= 0 ? `<span class="chip">First time <b>night ${r.throughIdx + 1}</b></span>` : ''}
         <span class="chip">Current streak <b>${r.streak}</b></span>
         <span class="chip">Check-ins <b>${r.st.reduce((a, s) => a + s.checks, 0)}</b></span>
+        ${r.taps.length ? `<span class="chip">Tapped out <b class="tapflag">${r.taps.length}</b></span>` : ''}
+        ${r.naps ? `<span class="chip">Day naps <b>${r.naps}</b></span>` : ''}
       </div>
     </div>
     ${r.ns.length ? `<div class="card"><h2>Awake time trend</h2>${trendChart(METRICS[0], r.ns)}<p class="small">${trendWords(METRICS[0], r.ns)}</p></div>
-      <div class="card"><h2>Awake windows</h2>${sleepMap(r.ns.slice(-planLen()), Math.max(1, r.ns.length - planLen() + 1))}</div>` : ''}
+      <div class="card"><h2>Awake windows</h2>${sleepMap(r.ns.slice(-planLen()), 'night')}</div>` : ''}
     <button class="btn primary" id="share">Share report</button>
+    <button class="btn" data-go="export">Export everything (for a doctor or AI)</button>
     ${finished ? `<button class="btn" id="again">Start a new plan</button>` : `<button class="btn ghost" id="stop">Stop the Sleep Coach and keep this as the final report</button>`}`;
   $('#share').onclick = async () => {
     const text = reportText(r);
@@ -818,8 +1071,105 @@ function stopCoach() {
   S.finished = Date.now(); save(); go('report');
 }
 function newPlan() {
-  if (!confirm('Start a new plan? This clears the nights in Progress. Share the report first if you want to keep it.')) return;
-  S.nights = []; S.finished = null; save(); go('home');
+  if (!confirm('Start a new plan? This clears the nights, naps and notes in Progress. Export them first if you want to keep them.')) return;
+  S.nights = []; S.notes = []; S.finished = null; save(); go('home');
+}
+
+/* ---------- export: everything, for a sleep doctor or an AI ---------- */
+// Every event of one sleep, in time order.
+function sessionEvents(n) {
+  const ev = [];
+  n.wakings.forEach((w, i) => {
+    ev.push({ t: w.start, what: i === 0 ? (isNap(n) ? 'Put down for nap' : 'Put down for the night') : 'Woke up', detail: '' });
+    w.checks.forEach((secs, j) => {
+      const at = w.checkAt && w.checkAt[j];
+      ev.push({ t: at || w.start, what: `Check-in ${j + 1}`, detail: secs == null ? 'length not recorded (entered by hand)' : secs + ' s in the room', noTime: !at });
+    });
+    if (w.asleep) ev.push({ t: w.asleep, what: w.pickedUp ? 'Picked up after the final check-in' : 'Fell asleep',
+      detail: `awake ${hm((w.asleep - w.start) / 60000)}, ${w.checks.length} check-in${w.checks.length === 1 ? '' : 's'}` });
+  });
+  (n.notes || []).forEach(nt => ev.push({ t: nt.t, what: nt.auto ? 'App note' : 'Parent note', detail: nt.text }));
+  if (n.tappedOut) ev.push({ t: n.tappedOut, what: 'TAPPED OUT', detail: 'parent stopped the training for this sleep' });
+  else if (n.ended) ev.push({ t: n.ended, what: isNap(n) ? 'Nap over' : 'Night finished (morning)', detail: '' });
+  return ev.sort((a, b) => a.t - b.t);
+}
+function exportText() {
+  const out = [], r = reportData(), all = S.nights.slice().sort((a, b) => a.started - b.started);
+  const dt = t => new Date(t).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  out.push(`SLEEP TRAINING LOG: ${name()}`);
+  out.push(`Exported from Sleep Coach on ${dt(Date.now())} at ${clock(Date.now())}.`);
+  out.push('');
+  out.push('SET-UP');
+  out.push(`Night window: ${S.baby.bed} to ${S.baby.wake} (${nightHours().toFixed(1)} hours). Sleeps started outside this window are recorded as day naps.`);
+  out.push(`Method: timed check-ins. The parent waits ${mins().join(', ')} minutes before each check-in (then repeats the last wait), and keeps each check-in to about ${S.checkinSecs} seconds. After the last check-in the parent may pick the baby up.`);
+  out.push(`Plan length: ${planLen()} nights.${S.finished ? ' The plan was stopped on ' + dt(S.finished) + '.' : ''}`);
+  out.push('');
+  out.push('SUMMARY');
+  out.push(`Nights recorded: ${r.ns.length}. Slept through: ${r.st.filter(s => s.through).length}. Tapped out: ${r.taps.length}${r.taps.length ? ' (night ' + r.taps.join(', ') + ')' : ''}. Day naps recorded: ${r.naps}.`);
+  if (r.c) {
+    out.push(`First ${r.c.k} nights compared with the last ${r.c.k} (averages):`);
+    r.c.rows.forEach(({ m, from, to }) => out.push(`  ${m.label}: ${m.fmt(from)} -> ${m.fmt(to)}`));
+  }
+  out.push(`App's verdict: ${r.verdict}`);
+  out.push('');
+  out.push('HOW TO READ THIS: each sleep lists when the baby was put down, each waking, every check-in, when the baby fell asleep, and the parent\'s notes, in time order. "Awake" means awake or crying. "Picked up" means the parent picked the baby up after the final check-in. "TAPPED OUT" means the parent stopped the training for that sleep (for example and took the baby into their bed).');
+  all.forEach(n => {
+    const s = stats(n);
+    out.push('');
+    out.push(`${isNap(n) ? 'DAY NAP' : 'NIGHT ' + nightNo(n)}: ${dt(n.started)}${n.ended ? '' : ' (still in progress)'}`);
+    sessionEvents(n).forEach(e => out.push(`  ${e.noTime ? '  ?  ' : clock(e.t)}  ${e.what}${e.detail ? ': ' + e.detail : ''}`));
+    out.push(`  Totals: settled in ${hm(s.settle)}; ${s.wakings} waking${s.wakings === 1 ? '' : 's'}; awake ${hm(s.awake)} in total; ${isNap(n) ? 'nap length' : 'longest sleep'} ${hm(s.longest * 60)}; ${s.checks} check-ins${s.through && !isNap(n) ? '; slept through' : ''}${s.tappedOut ? '; TAPPED OUT' : ''}.`);
+  });
+  if (S.notes.length) {
+    out.push('');
+    out.push('OTHER NOTES (not during a sleep)');
+    S.notes.forEach(nt => out.push(`  ${dt(nt.t)} ${clock(nt.t)}  ${nt.text}`));
+  }
+  return out.join('\n');
+}
+function exportCsv() {
+  const q = x => `"${String(x).replace(/"/g, '""')}"`;
+  const rows = [['sleep', 'type', 'date', 'time', 'event', 'detail']];
+  S.nights.slice().sort((a, b) => a.started - b.started).forEach(n => {
+    const label = isNap(n) ? 'Nap' : 'Night ' + nightNo(n);
+    sessionEvents(n).forEach(e => rows.push([label, isNap(n) ? 'nap' : 'night', new Date(e.t).toISOString().slice(0, 10), e.noTime ? '' : hhmmOf(e.t), e.what, e.detail]));
+  });
+  S.notes.forEach(nt => rows.push(['', 'note', new Date(nt.t).toISOString().slice(0, 10), hhmmOf(nt.t), 'Parent note', nt.text]));
+  return rows.map(r => r.map(q).join(',')).join('\r\n');
+}
+function download(blob, fname) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = fname;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+function exportScreen(v) {
+  const txt = exportText();
+  const base = `sleep-coach-${name().replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-${new Date().toISOString().slice(0, 10)}`;
+  v.innerHTML = `${header('Export everything')}
+    <p class="muted">Everything recorded: every sleep, awake window, check-in, tap-out and note. Send it to your doctor or sleep consultant, or give it to an AI assistant for advice.</p>
+    <button class="btn primary big" id="sharefile">Share as a file</button>
+    <button class="btn" id="sharetext">Share as text (WhatsApp, email)</button>
+    <button class="btn" id="copy">Copy to clipboard</button>
+    <button class="btn" id="csv">Download as a spreadsheet (CSV)</button>
+    <div class="tip"><b>Asking an AI?</b> Paste the text and add a question, for example: “This is my baby's sleep training log. What patterns do you notice, and what should I try next?”</div>
+    <h2>Preview</h2>
+    <pre class="export">${esc(txt)}</pre>`;
+  const file = new File([txt], base + '.txt', { type: 'text/plain' });
+  $('#sharefile').onclick = async () => {
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) return await navigator.share({ files: [file], title: 'Sleep Coach log' });
+    } catch (e) { if (e.name === 'AbortError') return; }
+    download(file, file.name);
+  };
+  $('#sharetext').onclick = async () => {
+    try { if (navigator.share) return await navigator.share({ title: 'Sleep Coach log', text: txt }); } catch (e) { return; }
+    $('#copy').click();
+  };
+  $('#copy').onclick = async () => {
+    try { await navigator.clipboard.writeText(txt); toast('Copied. Paste it wherever you like'); } catch (e) { alert('Could not copy on this phone. Use "Share as a file" instead.'); }
+  };
+  $('#csv').onclick = () => download(new Blob([exportCsv()], { type: 'text/csv' }), base + '.csv');
+  bindGo(v);
 }
 
 function readyScreen(v) {
@@ -837,8 +1187,8 @@ function settingsScreen(v) {
   v.innerHTML = `${header('Settings')}
     <div class="card">
       <h2>${esc(name())}</h2>
-      <p class="muted">Bed ${S.baby.bed} · Awake ${S.baby.wake}</p>
-      <button class="btn" data-go="setup">Change name or times</button>
+      <p class="muted">Night ${S.baby.bed}–${S.baby.wake}. Sleeps outside that are day naps.</p>
+      <button class="btn" data-go="setup">Change name or night times</button>
       <p class="muted" style="margin-top:16px">Program: <b style="color:var(--text)">${programLabel(S.program)}</b> · check-ins ${S.checkinSecs} sec</p>
       <button class="btn" data-go="program">Change program</button>
     </div>
@@ -857,14 +1207,14 @@ function settingsScreen(v) {
       <div class="seg">${[10, 14, 21, 28].map(d => `<button data-plan="${d}" class="${planLen() === d ? 'on' : ''}">${d} nights</button>`).join('')}</div>
       <p class="small muted">The trend line and report are measured over this many nights.</p>
       <button class="btn" data-go="report">Get my report</button>
+      <button class="btn" data-go="export">Export everything (for a doctor or AI)</button>
       ${S.finished ? '' : `<button class="btn ghost" id="stop">Stop the Sleep Coach (final report)</button>`}
     </div>
     <div class="card">
       <button class="btn ghost" id="wipe">Clear progress (start a new plan)</button>
       <button class="btn ghost" id="reset">Reset everything</button>
     </div>
-    <p class="small muted center">Sleep Coach v${APP_VERSION}. Everything stays on this phone and works offline.<br>
-      Method notes adapted from Katie Bunton's “How I Gently Sleep Trained”. Not medical advice.</p>`;
+    <p class="small muted center">Sleep Coach v${APP_VERSION}. Everything stays on this phone and works offline. Not medical advice.</p>`;
   $('#snd').onchange = e => { S.sound = e.target.checked; save(); };
   $('#vib').onchange = e => { S.vibrate = e.target.checked; save(); };
   $('#test').onclick = () => psst();
@@ -883,10 +1233,13 @@ function settingsScreen(v) {
   };
   v.querySelectorAll('[data-plan]').forEach(b => b.onclick = () => { S.planNights = +b.dataset.plan; save(); render(); });
   const stop = $('#stop'); if (stop) stop.onclick = stopCoach;
-  $('#wipe').onclick = () => { if (confirm('Delete all nights from Progress?')) { S.nights = []; S.finished = null; save(); render(); } };
+  $('#wipe').onclick = () => { if (confirm('Delete all nights, naps and notes from Progress?')) { S.nights = []; S.notes = []; S.finished = null; save(); render(); } };
   $('#reset').onclick = () => { if (confirm('Delete the baby details, program and all progress?')) { try { localStorage.removeItem(KEY); } catch (e) {} location.reload(); } };
   bindGo(v);
 }
 
+$('#fab').onclick = () => openNote();
+$('#mini').onclick = () => go('session');
+if (S.live) screen = 'session';   // reopening the app mid-sleep goes straight back to the timer
 render();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});

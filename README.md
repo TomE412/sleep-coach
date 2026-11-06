@@ -15,3 +15,11 @@ Bump `CACHE` in `sw.js` and `APP_VERSION` in `app.js`, then commit and push.
 ## Ideas for later
 - Automatic check-in timer (10–30 s) that cues the parent to leave.
 - Twins: two babies tracked side by side.
+
+## v2 (6 Nov 2026)
+- Sleeps are `S.nights[]` entries with `kind: 'night' | 'nap'` (old entries without `kind` are nights). The night window is `S.baby.bed`–`S.baby.wake`; a sleep started outside it (with 30 min grace before bedtime) is a day nap. Night numbers count nights only.
+- Notes: `session.notes[]` while a sleep runs, otherwise `S.notes[]`. Quick chips + free text.
+- Minimise: `screen` can leave `'session'` while `S.live` runs; `#mini` bar counts down, and the alarm jumps back to the timer unless the note sheet is open.
+- Tap out: `session.tappedOut` (+ `waking.tappedOut`); red bars/markers on charts.
+- Taking over: start a sleep from typed times (put-down, check-ins done, current wait start).
+- Export: full text log (for a doctor or an AI) as file/text/clipboard, plus CSV.
